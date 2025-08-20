@@ -2,7 +2,7 @@
 
 This project provides a Telegram bot integration for the Gemini CLI, enabling powerful AI-driven automation and interactive responses directly within your Telegram chats. The core idea is to bridge the gap between conversational interfaces and robust command-line automation, allowing Gemini to participate in conversations, respond to messages, and automate tasks in a helpful and informative way while allowing you to move away from your machine but still continue with your vibe coding.
 
-This project was inspired by the original Slack bot concept from John Capobianco[(https://github.com/automateyournetwork/GeminiCLI_Slash_Listen)], to whom we extend our sincere thanks for his foundational work and vision in integrating AI with automation. 
+This project was inspired by the original Slack bot concept from [John Capobianco](https://github.com/automateyournetwork/GeminiCLI_Slash_Listen).
 
 ## Installation
 
@@ -13,7 +13,7 @@ To get started, you'll need to clone this repository and set up the necessary co
 First, clone the repository to your local machine:
 
 ```bash
-git clone 
+git clone https://github.com/bravian1/gemini_cli_server.git
 ```
 
 ### Project Setup
@@ -93,19 +93,3 @@ curl -X POST https://your-ngrok.ngrok-free.app/event -H "Content-Type: applicati
 
 ## MCP Integration
 If your Gemini CLI is integrated with MCP servers they are fully accessible via the Telegram bot. Meaning Gemini CLI will invoke those MCP servers when a message is received if they will help respond to the message.
-
----
-
-## Creating TikTok Content for the Gemini CLI Telegram Bot
-
-To create an engaging TikTok video showcasing this project, consider the following steps for your content:
-
-1.  **Introduce the Problem & Solution:** Hook viewers by highlighting the challenge of being tied to a desk for coding and introduce the Telegram bot as a solution for "vibe coding" on the go.
-2.  **Explain the Server:** Briefly describe the custom server that enables communication between Telegram and the Gemini CLI.
-3.  **Install Gemini CLI:** Show the simple installation process for the Gemini CLI.
-4.  **Initialize Gemini CLI:** Demonstrate running Gemini CLI once to set up the necessary `.gemini` folder.
-5.  **Set up Telegram Bot (BotFather):** Guide users through creating a new bot with BotFather and obtaining the API token.
-6.  **Configure Environment Variables:** Show how to add the Telegram bot token and other configurations to the `.env` file.
-7.  **Run the Server/Bot:** Illustrate starting both the server and the Telegram bot.
-8.  **Interact with the Bot:** Showcase sending commands to the bot via Telegram and receiving responses from Gemini CLI.
-9.  **Call to Action:** Encourage viewers to try the project themselves, providing a link to the GitHub repository.
