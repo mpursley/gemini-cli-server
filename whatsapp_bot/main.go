@@ -45,6 +45,10 @@ var (
 	userSessions = make(map[string]string) // Map JID to SessionID
 )
 
+func strPtr(s string) *string {
+	return &s
+}
+
 func main() {
 	if err := godotenv.Load(); err != nil {
 		log.Printf("Warning: .env file not found")
@@ -85,11 +89,28 @@ func main() {
 			}
 		}
 	} else {
+		// Already logged in, just connect
 		err = client.Connect()
 		if err != nil {
 			log.Fatal(err)
 		}
 	}
+
+	// Keep-alive/reconnect loop
+	go func() {
+		for {
+			time.Sleep(10 * time.Second)
+			if !client.IsConnected() {
+				log.Printf("WhatsApp client disconnected, attempting to reconnect...")
+				err := client.Connect()
+				if err != nil {
+					log.Printf("Failed to reconnect: %v", err)
+				} else {
+					log.Printf("Successfully reconnected to WhatsApp")
+				}
+			}
+		}
+	}()
 
 	// Listen to system signals to safely shut down
 	c := make(chan os.Signal, 1)
@@ -113,6 +134,8 @@ type SessionsResponse struct {
 
 func handler(rawEvt interface{}) {
 	switch evt := rawEvt.(type) {
+	case *events.Connected:
+		log.Printf("WhatsApp bot connected and ready.")
 	case *events.Message:
 		if evt.Info.IsFromMe {
 			return
@@ -128,7 +151,7 @@ func handler(rawEvt interface{}) {
 		// 1. Handle Images
 		var imageData, mimeType string
 		if img := evt.Message.GetImageMessage(); img != nil {
-			data, err := client.Download(img)
+			data, err := client.Download(context.Background(), img)
 			if err != nil {
 				log.Printf("Failed to download image: %v", err)
 			} else {
@@ -158,7 +181,7 @@ func handler(rawEvt interface{}) {
 			switch cmd {
 			case "/new":
 				userSessions[jid] = ""
-				client.SendMessage(context.Background(), evt.Info.Chat, &waE2E.Message{Conversation: strings.Ptr("🆕 Started a new session.")})
+				client.SendMessage(context.Background(), evt.Info.Chat, &waE2E.Message{Conversation: strPtr("🆕 Started a new session.")})
 				return
 			case "/status":
 				sID := "None"
@@ -201,7 +224,7 @@ func handler(rawEvt interface{}) {
 			if modelName != "" {
 				modelSuffix = fmt.Sprintf(" (%s)", modelName)
 			}
-			reply = fmt.Sprintf("%s\n\n🆔 Session: %s%s", reply, newSessionID, modelSuffix)
+			reply = fmt.Sprintf("🆔 Session: %s%s\n\n%s", newSessionID, modelSuffix, reply)
 		}
 
 		client.SendMessage(context.Background(), evt.Info.Chat, &waE2E.Message{

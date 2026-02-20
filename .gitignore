@@ -5,3 +5,13 @@ tmp/
 *_bin
 .DS_Store
 screenshots/
+
+# Go binaries
+telegram_bot/telegram_bot
+whatsapp_bot/whatsapp_bot
+bin/
+obj/
+*.exe
+*.test
+*.out
+vendor/
