@@ -14,9 +14,8 @@ stop_all() {
     # Stop Telegram Bot
     if [ -f "$BOT_PID_FILE" ]; then
         PID=$(cat "$BOT_PID_FILE")
-        if ps -p "$PID" > /dev/null 2>&1; then
-            kill "$PID"
-            echo "  - Stopped bot (PID $PID)"
+        if [ -n "$PID" ]; then
+            kill "$PID" >/dev/null 2>&1 || true
         fi
         rm -f "$BOT_PID_FILE"
     fi
@@ -28,15 +27,21 @@ stop_all() {
     # Stop Listener
     if [ -f "$LISTEN_PID_FILE" ]; then
         PID=$(cat "$LISTEN_PID_FILE")
-        if ps -p "$PID" > /dev/null 2>&1; then
-            kill "$PID"
-            echo "  - Stopped listener (PID $PID)"
+        if [ -n "$PID" ]; then
+            kill "$PID" >/dev/null 2>&1 || true
         fi
         rm -f "$LISTEN_PID_FILE"
     fi
     
     # Kill any other orphaned listener processes
-    pkill -f "node.*listen.js" > /dev/null 2>&1
+    pkill -f "listen.js" > /dev/null 2>&1
+    
+    # Force kill anything on port 8765
+    LSOF_PID=$(lsof -t -i :8765)
+    if [ -n "$LSOF_PID" ]; then
+        echo "  - Clearing port 8765 (PID $LSOF_PID)"
+        kill -9 $LSOF_PID >/dev/null 2>&1 || true
+    fi
     
     echo "✅ All services stopped."
 }
@@ -44,36 +49,49 @@ stop_all() {
 start_all() {
     echo "🚀 Starting services..."
 
-    # 1. Check if listener is running
-    if pgrep -f "node.*listen.js" > /dev/null; then
-        echo "  - ⚠️ Listener is already running. Skipping start."
+    # 1. Start listener
+    echo "  - Starting listener..."
+    mkdir -p /tmp
+    nohup node "$LISTEN_SCRIPT" 8765 >> /tmp/gemini-listen.log 2>&1 &
+    echo $! > "$LISTEN_PID_FILE"
+    sleep 2 # Give it a moment to bind to port
+    
+    if lsof -i :8765 > /dev/null; then
+        echo "  - Listener started (PID $(cat "$LISTEN_PID_FILE"))"
     else
-        echo "  - Starting listener..."
-        mkdir -p /tmp
-        nohup node "$LISTEN_SCRIPT" 8765 >> /tmp/gemini-listen.log 2>&1 &
-        echo $! > "$LISTEN_PID_FILE"
-        echo "  - Listener started (PID $!)"
+        echo "  - ❌ Listener failed to start! Check /tmp/gemini-listen.log"
     fi
 
-    # 2. Check if bot is running
-    if pgrep -f "telegram_bot_bin" > /dev/null || pgrep -f "go run main.go" > /dev/null; then
-        echo "  - ⚠️ Telegram Bot is already running. Skipping start."
-    else
-        # Ensure binary exists
-        if [ ! -f "$BOT_BIN" ]; then
-            echo "  - Compiling bot..."
-            cd "$BOT_DIR" && go build -o telegram_bot_bin main.go
-        fi
-        
-        echo "  - Starting Telegram bot..."
-        cd "$BOT_DIR"
-        nohup ./telegram_bot_bin >> /tmp/telegram-bot.log 2>&1 &
-        echo $! > "$BOT_PID_FILE"
-        echo "  - Telegram Bot started (PID $!)"
+    # 2. Start bot
+    if [ ! -f "$BOT_BIN" ]; then
+        echo "  - Compiling bot..."
+        cd "$BOT_DIR" && go build -o telegram_bot_bin main.go
+        cd "$REPO_DIR"
     fi
+    
+    echo "  - Starting Telegram bot..."
+    cd "$BOT_DIR"
+    nohup ./telegram_bot_bin >> /tmp/telegram-bot.log 2>&1 &
+    echo $! > "$BOT_PID_FILE"
+    cd "$REPO_DIR"
+    echo "  - Telegram Bot started (PID $(cat "$BOT_PID_FILE"))"
 
     echo "✅ Services are up."
-    echo "   Logs: tail -f /tmp/gemini-listen.log /tmp/telegram-bot.log"
+}
+
+status_all() {
+    echo "📊 Status:"
+    if lsof -i :8765 > /dev/null; then 
+        echo "  - Listener: RUNNING (on port 8765)"
+    else 
+        echo "  - Listener: STOPPED"
+    fi
+    
+    if pgrep -f "telegram_bot_bin" > /dev/null; then 
+        echo "  - Bot:      RUNNING"
+    else 
+        echo "  - Bot:      STOPPED"
+    fi
 }
 
 case "$1" in
@@ -89,9 +107,7 @@ case "$1" in
         start_all
         ;;
     status)
-        echo "📊 Status:"
-        if pgrep -f "node.*listen.js" > /dev/null; then echo "  - Listener: RUNNING"; else echo "  - Listener: STOPPED"; fi
-        if pgrep -f "telegram_bot_bin" > /dev/null || pgrep -f "go run main.go" > /dev/null; then echo "  - Bot:      RUNNING"; else echo "  - Bot:      STOPPED"; fi
+        status_all
         ;;
     *)
         echo "Usage: $0 {start|stop|restart|status}"

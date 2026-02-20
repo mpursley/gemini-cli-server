@@ -143,7 +143,7 @@ func handleMessage(message *tgbotapi.Message) {
 		return
 	}
 
-	log.Printf("Processing message from %s: %s", message.From.UserName, text)
+	log.Printf("Processing message from %s (Session: %s): %s", message.From.UserName, userState.SessionID, text)
 
 	var prompt string
 	
@@ -158,12 +158,18 @@ func handleMessage(message *tgbotapi.Message) {
 			context, message.From.FirstName, text)
 	
 
+	isNewSession := userState.SessionID == ""
 	reply, newSessionID := callGemini(prompt, userState.SessionID)
 	if newSessionID != "" {
 		userState.SessionID = newSessionID
 	}
 
+	if isNewSession && newSessionID != "" {
+		reply = fmt.Sprintf("%s\n\n🆔 Session ID: `%s`", reply, newSessionID)
+	}
+
 	msg := tgbotapi.NewMessage(message.Chat.ID, reply)
+	msg.ParseMode = "Markdown"
 	if message.ReplyToMessage != nil {
 		msg.ReplyToMessageID = message.MessageID
 	}
@@ -187,7 +193,7 @@ func callGemini(prompt string, sessionId string) (string, string) {
 	}
 
 	client := &http.Client{Timeout: 300 * time.Second}
-	log.Printf("Calling Gemini at URL: %s", geminiURL)
+	log.Printf("Calling Gemini at URL: %s (Session: %s)", geminiURL, sessionId)
 	resp, err := client.Post(geminiURL, "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
 		log.Printf("Error calling Gemini: %v", err)
@@ -274,11 +280,20 @@ func handleVoiceMessage(message *tgbotapi.Message) {
 		context, message.From.FirstName, text)
 
 	userState := getUserState(message.From.ID)
+	log.Printf("Processing voice message from %s (Session: %s): %s", message.From.UserName, userState.SessionID, text)
+
+	isNewSession := userState.SessionID == ""
 	reply, newSessionID := callGemini(prompt, userState.SessionID)
 	if newSessionID != "" {
 		userState.SessionID = newSessionID
 	}
+
+	if isNewSession && newSessionID != "" {
+		reply = fmt.Sprintf("%s\n\n🆔 Session ID: `%s`", reply, newSessionID)
+	}
+
 	msg := tgbotapi.NewMessage(message.Chat.ID, reply)
+	msg.ParseMode = "Markdown"
 	if message.ReplyToMessage != nil {
 		msg.ReplyToMessageID = message.MessageID
 	}

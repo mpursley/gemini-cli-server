@@ -14,6 +14,7 @@ function runGemini(prompt, sessionId = null) {
     if (sessionId) {
       args.push("--resume", sessionId);
     }
+    console.log(`[${new Date().toISOString()}] Executing Gemini (Session: ${sessionId || "new"})`);
     const p = spawn("gemini", args, { stdio: ["ignore", "pipe", "pipe"] });
     let out = "", err = "";
     p.stdout.on("data", d => (out += d.toString()));
