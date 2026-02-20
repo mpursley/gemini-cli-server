@@ -41,10 +41,58 @@ function runGemini(prompt, sessionId = null) {
   });
 }
 
+function listSessions() {
+  return new Promise((resolve, reject) => {
+    console.log(`[${new Date().toISOString()}] Listing sessions...`);
+    const p = spawn("gemini", ["--list-sessions"], { stdio: ["ignore", "pipe", "pipe"] });
+    let out = "", err = "";
+    p.stdout.on("data", d => (out += d.toString()));
+    p.stderr.on("data", d => (err += d.toString()));
+    p.on("close", code => {
+      if (code === 0 || code === null) {
+        const lines = out.split("\n");
+        const sessions = [];
+        
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          // Match digits, then capture description, time ago, and uuid.
+          const match = trimmed.match(/(\d+)\.\s+(.*?)\s+\((.*?)\)\s+\[(.*?)\]$/);
+          if (match) {
+            sessions.push({
+              description: match[2].trim(),
+              time: match[3].trim(),
+              id: match[4].trim()
+            });
+          }
+        }
+        console.log(`[${new Date().toISOString()}] Found ${sessions.length} sessions.`);
+        resolve(sessions);
+      } else {
+        console.error(`[${new Date().toISOString()}] Error listing sessions: ${err}`);
+        reject(new Error(err || `exit ${code}`));
+      }
+    });
+  });
+}
+
 const server = http.createServer((req, res) => {
   if (req.method === "GET" && req.url === "/health") {
     res.writeHead(200, { "Content-Type": "text/plain" });
     return res.end("ok");
+  }
+
+  if (req.method === "GET" && req.url === "/sessions") {
+    listSessions()
+      .then(sessions => {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, sessions }));
+      })
+      .catch(e => {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: String(e.message || e) }));
+      });
+    return;
   }
 
   if (req.method === "POST" && req.url.startsWith("/event")) {

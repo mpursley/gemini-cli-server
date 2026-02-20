@@ -116,6 +116,18 @@ func getUserState(userID int64) *UserState {
 	return userStates[userID]
 }
 
+type Session struct {
+	ID          string `json:"id"`
+	Description string `json:"description"`
+	Time        string `json:"time"`
+}
+
+type SessionsResponse struct {
+	Ok       bool      `json:"ok"`
+	Sessions []Session `json:"sessions"`
+	Error    string    `json:"error,omitempty"`
+}
+
 func handleMessage(message *tgbotapi.Message) {
 	if message.From.IsBot {
 		return
@@ -141,6 +153,39 @@ func handleMessage(message *tgbotapi.Message) {
 	text := strings.TrimSpace(message.Text)
 	if text == "" {
 		return
+	}
+
+	// Handle Commands
+	if strings.HasPrefix(text, "/") {
+		parts := strings.Fields(text)
+		command := parts[0]
+
+		switch command {
+		case "/start":
+			msg := tgbotapi.NewMessage(message.Chat.ID, "👋 Welcome! I'm your Gemini assistant. Send me a message or a voice note to get started.\n\nCommands:\n/sessions - List recent sessions\n/attach <id> - Attach to a session\n/new - Start a new session")
+			bot.Send(msg)
+			return
+		case "/new":
+			userState.SessionID = ""
+			msg := tgbotapi.NewMessage(message.Chat.ID, "🆕 Started a new session.")
+			bot.Send(msg)
+			return
+		case "/sessions":
+			handleSessionsCommand(message)
+			return
+		case "/attach":
+			if len(parts) < 2 {
+				msg := tgbotapi.NewMessage(message.Chat.ID, "❌ Please provide a session ID. Example: `/attach 8a3d000a...`")
+				msg.ParseMode = "Markdown"
+				bot.Send(msg)
+				return
+			}
+			userState.SessionID = parts[1]
+			msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("🔗 Attached to session: `%s`", userState.SessionID))
+			msg.ParseMode = "Markdown"
+			bot.Send(msg)
+			return
+		}
 	}
 
 	log.Printf("Processing message from %s (Session: %s): %s", message.From.UserName, userState.SessionID, text)
@@ -177,6 +222,60 @@ func handleMessage(message *tgbotapi.Message) {
 	if _, err := bot.Send(msg); err != nil {
 		log.Printf("Error sending message: %v", err)
 	}
+}
+
+func handleSessionsCommand(message *tgbotapi.Message) {
+	sessions, err := fetchSessions()
+	if err != nil {
+		msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("❌ Error fetching sessions: %v", err))
+		bot.Send(msg)
+		return
+	}
+
+	if len(sessions) == 0 {
+		msg := tgbotapi.NewMessage(message.Chat.ID, "📭 No recent sessions found.")
+		bot.Send(msg)
+		return
+	}
+
+	var sb strings.Builder
+	sb.WriteString("📋 *Recent Sessions:*\n\n")
+	for i, s := range sessions {
+		if i >= 10 { // Limit to top 10
+			break
+		}
+		description := s.Description
+		if len(description) > 50 {
+			description = description[:47] + "..."
+		}
+		sb.WriteString(fmt.Sprintf("%d. %s\n   _Time: %s_\n   ID: `/attach %s`\n\n", i+1, description, s.Time, s.ID))
+	}
+
+	msg := tgbotapi.NewMessage(message.Chat.ID, sb.String())
+	msg.ParseMode = "Markdown"
+	bot.Send(msg)
+}
+
+func fetchSessions() ([]Session, error) {
+	// Update URL for sessions endpoint
+	sessionsURL := strings.Replace(geminiURL, "/event", "/sessions", 1)
+	
+	resp, err := http.Get(sessionsURL)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var sessResp SessionsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&sessResp); err != nil {
+		return nil, err
+	}
+
+	if !sessResp.Ok {
+		return nil, fmt.Errorf(sessResp.Error)
+	}
+
+	return sessResp.Sessions, nil
 }
 
 func callGemini(prompt string, sessionId string) (string, string) {
