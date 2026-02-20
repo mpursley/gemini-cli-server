@@ -6,9 +6,15 @@ TMP_DIR="$REPO_DIR/tmp"
 BOT_DIR="$REPO_DIR/telegram_bot"
 BOT_BIN="$BOT_DIR/telegram_bot_bin"
 BOT_PID_FILE="$TMP_DIR/telegram-bot.pid"
+BOT_LOG="$TMP_DIR/telegram-bot.log"
+
+WA_BOT_DIR="$REPO_DIR/whatsapp_bot"
+WA_BOT_BIN="$WA_BOT_DIR/whatsapp_bot_bin"
+WA_BOT_PID_FILE="$TMP_DIR/whatsapp-bot.pid"
+WA_BOT_LOG="$TMP_DIR/whatsapp-bot.log"
+
 LISTEN_PID_FILE="$TMP_DIR/gemini-listen.pid"
 LISTEN_LOG="$TMP_DIR/gemini-listen.log"
-BOT_LOG="$TMP_DIR/telegram-bot.log"
 LISTEN_SCRIPT="$REPO_DIR/scripts/listen.js"
 
 mkdir -p "$TMP_DIR"
@@ -24,9 +30,19 @@ stop_all() {
         fi
         rm -f "$BOT_PID_FILE"
     fi
+
+    # Stop WhatsApp Bot
+    if [ -f "$WA_BOT_PID_FILE" ]; then
+        PID=$(cat "$WA_BOT_PID_FILE")
+        if [ -n "$PID" ]; then
+            kill "$PID" >/dev/null 2>&1 || true
+        fi
+        rm -f "$WA_BOT_PID_FILE"
+    fi
     
     # Kill any other orphaned bot processes
     pkill -f "telegram_bot_bin" > /dev/null 2>&1
+    pkill -f "whatsapp_bot_bin" > /dev/null 2>&1
     pkill -f "go run main.go" > /dev/null 2>&1
     
     # Stop Listener
@@ -66,13 +82,13 @@ start_all() {
         echo "  - ❌ Listener failed to start! Check $LISTEN_LOG"
     fi
 
-    # 2. Start bot
-    echo "  - Compiling bot..."
+    # 2. Start Telegram bot
+    echo "  - Compiling Telegram bot..."
     cd "$BOT_DIR"
     if go build -o telegram_bot_bin main.go >> "$BOT_LOG" 2>&1; then
-        echo "  - Bot compiled successfully."
+        echo "  - Telegram Bot compiled successfully."
     else
-        echo "  - ❌ Bot compilation failed! Check $BOT_LOG"
+        echo "  - ❌ Telegram Bot compilation failed! Check $BOT_LOG"
         cd "$REPO_DIR"
         return 1
     fi
@@ -84,6 +100,29 @@ start_all() {
     echo $! > "$BOT_PID_FILE"
     cd "$REPO_DIR"
     echo "  - Telegram Bot started (PID $(cat "$BOT_PID_FILE"))"
+
+    # 3. Start WhatsApp bot (Optional/Manual QR)
+    if [ "$START_WA" = "true" ]; then
+        echo "  - Compiling WhatsApp bot..."
+        cd "$WA_BOT_DIR"
+        if go build -o whatsapp_bot_bin main.go >> "$WA_BOT_LOG" 2>&1; then
+            echo "  - WhatsApp Bot compiled successfully."
+        else
+            echo "  - ❌ WhatsApp Bot compilation failed! Check $WA_BOT_LOG"
+            cd "$REPO_DIR"
+            return 1
+        fi
+        cd "$REPO_DIR"
+        
+        echo "  - Starting WhatsApp bot..."
+        echo "    NOTE: If this is the first time, you may need to run it manually to scan the QR code:"
+        echo "    cd whatsapp_bot && ./whatsapp_bot_bin"
+        cd "$WA_BOT_DIR"
+        nohup ./whatsapp_bot_bin >> "$WA_BOT_LOG" 2>&1 &
+        echo $! > "$WA_BOT_PID_FILE"
+        cd "$REPO_DIR"
+        echo "  - WhatsApp Bot started (PID $(cat "$WA_BOT_PID_FILE"))"
+    fi
 
     echo "✅ Services are up."
     echo "   To view logs, run: $0 logs"
@@ -98,9 +137,15 @@ status_all() {
     fi
     
     if pgrep -f "telegram_bot_bin" > /dev/null; then 
-        echo "  - Bot:      RUNNING"
+        echo "  - Telegram Bot: RUNNING"
     else 
-        echo "  - Bot:      STOPPED"
+        echo "  - Telegram Bot: STOPPED"
+    fi
+
+    if pgrep -f "whatsapp_bot_bin" > /dev/null; then 
+        echo "  - WhatsApp Bot: RUNNING"
+    else 
+        echo "  - WhatsApp Bot: STOPPED"
     fi
 }
 
@@ -120,7 +165,7 @@ case "$1" in
         status_all
         ;;
     logs)
-        tail -f "$LISTEN_LOG" "$BOT_LOG"
+        tail -f "$LISTEN_LOG" "$BOT_LOG" "$WA_BOT_LOG" 2>/dev/null
         ;;
     *)
         echo "Usage: $0 {start|stop|restart|status|logs}"

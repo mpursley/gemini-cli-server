@@ -2,10 +2,13 @@
 
 # Paths
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TMP_DIR="$REPO_DIR/tmp"
 WA_BOT_DIR="$REPO_DIR/whatsapp_bot"
 WA_BOT_BIN="$WA_BOT_DIR/whatsapp_bot_bin"
-WA_BOT_PID_FILE="/tmp/whatsapp-bot.pid"
-WA_BOT_LOG="/tmp/whatsapp-bot.log"
+WA_BOT_PID_FILE="$TMP_DIR/whatsapp-bot.pid"
+WA_BOT_LOG="$TMP_DIR/whatsapp-bot.log"
+
+mkdir -p "$TMP_DIR"
 
 # Colors for output
 GREEN='\033[0;32m'
@@ -42,8 +45,8 @@ start_wa() {
     # 1. Compile
     echo -e "  - Compiling WhatsApp bot..."
     cd "$WA_BOT_DIR" || exit
-    if ! go build -o whatsapp_bot_bin main.go; then
-        echo -e "${RED}❌ Compilation failed!${NC}"
+    if ! go build -o whatsapp_bot_bin main.go >> "$WA_BOT_LOG" 2>&1; then
+        echo -e "${RED}❌ Compilation failed! Check $WA_BOT_LOG${NC}"
         exit 1
     fi
     
@@ -64,10 +67,10 @@ start_wa() {
     sleep 2
     if ps -p $(cat "$WA_BOT_PID_FILE") > /dev/null; then
         echo -e "${GREEN}✅ WhatsApp Bot started (PID $(cat "$WA_BOT_PID_FILE"))${NC}"
-        echo -e "   Logs: tail -f $WA_BOT_LOG"
+        echo -e "   Logs: $0 logs"
     else
         echo -e "${RED}❌ WhatsApp Bot failed to start!${NC}"
-        echo -e "   Check logs: cat $WA_BOT_LOG"
+        echo -e "   Check logs: $0 logs"
     fi
 }
 
