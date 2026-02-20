@@ -1,12 +1,12 @@
 #!/bin/bash
 
 # Paths
-REPO_DIR="/Users/mpursley/dev/gemini_cli_server"
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BOT_DIR="$REPO_DIR/telegram_bot"
 BOT_BIN="$BOT_DIR/telegram_bot_bin"
 BOT_PID_FILE="/tmp/telegram-bot.pid"
 LISTEN_PID_FILE="/tmp/gemini-listen.pid"
-LISTEN_SCRIPT="$HOME/.gemini/scripts/listen.js"
+LISTEN_SCRIPT="$REPO_DIR/scripts/listen.js"
 
 stop_all() {
     echo "🛑 Stopping services..."
