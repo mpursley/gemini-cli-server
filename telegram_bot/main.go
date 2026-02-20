@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -123,6 +124,35 @@ func main() {
 	}
 }
 
+func typingIndicator(ctx context.Context, chatID int64, messageID int) {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	dots := "..."
+	seconds := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			seconds++
+			dots += "."
+			if len(dots) > 15 {
+				dots = "..."
+			}
+			// Update the message text with seconds and dots
+			text := fmt.Sprintf("Thinking (%d seconds) %s", seconds, dots)
+			editMsg := tgbotapi.NewEditMessageText(chatID, messageID, text)
+			bot.Send(editMsg)
+			
+			// Refresh the telegram "typing" status every few seconds (it lasts ~5s)
+			if seconds%5 == 0 {
+				bot.Send(tgbotapi.NewChatAction(chatID, tgbotapi.ChatTyping))
+			}
+		}
+	}
+}
+
 func getUserState(userID int64) *UserState {
 	if state, exists := userStates[userID]; exists {
 		return state
@@ -221,17 +251,29 @@ func handleMessage(message *tgbotapi.Message) {
 	log.Printf("Processing message from %s (Current Session: %s): %s", message.From.UserName, userState.SessionID, text)
 
 	var prompt string
-	
-		
-		context := ""
-		if message.ReplyToMessage != nil {
-			context = fmt.Sprintf("Context: %s: %s\n\n",
-				message.ReplyToMessage.From.FirstName,
-				message.ReplyToMessage.Text)
-		}
-		prompt = fmt.Sprintf("%sYou are an assistant in a Telegram chat.\nAnswer this message:\n\n%s: %s",
-			context, message.From.FirstName, text)
-	
+	ctxText := ""
+	if message.ReplyToMessage != nil {
+		ctxText = fmt.Sprintf("Context: %s: %s\n\n",
+			message.ReplyToMessage.From.FirstName,
+			message.ReplyToMessage.Text)
+	}
+	prompt = fmt.Sprintf("%sYou are an assistant in a Telegram chat.\nAnswer this message:\n\n%s: %s",
+		ctxText, message.From.FirstName, text)
+
+	// Send initial thinking message
+	thinkingMsg := tgbotapi.NewMessage(message.Chat.ID, "Thinking...")
+	if message.ReplyToMessage != nil {
+		thinkingMsg.ReplyToMessageID = message.MessageID
+	}
+	sentMsg, err := bot.Send(thinkingMsg)
+	if err != nil {
+		log.Printf("Error sending thinking message: %v", err)
+	}
+
+	// Start typing indicator with the sent message ID
+	ctx, cancel := context.WithCancel(context.Background())
+	go typingIndicator(ctx, message.Chat.ID, sentMsg.MessageID)
+	defer cancel()
 
 	oldSessionID := userState.SessionID
 	reply, newSessionID, modelName := callGemini(prompt, userState.SessionID, "", "")
@@ -250,14 +292,13 @@ func handleMessage(message *tgbotapi.Message) {
 		reply = fmt.Sprintf("%s\n\n🆔 Session: %s%s", reply, newSessionID, modelSuffix)
 	}
 
-	msg := tgbotapi.NewMessage(message.Chat.ID, reply)
-	// msg.ParseMode = "Markdown" // Removed to prevent errors with special characters in Gemini responses
-	if message.ReplyToMessage != nil {
-		msg.ReplyToMessageID = message.MessageID
-	}
-
-	if _, err := bot.Send(msg); err != nil {
-		log.Printf("Error sending message: %v", err)
+	// Edit the thinking message with the actual reply
+	editMsg := tgbotapi.NewEditMessageText(message.Chat.ID, sentMsg.MessageID, reply)
+	if _, err := bot.Send(editMsg); err != nil {
+		log.Printf("Error editing message: %v", err)
+		// Fallback: send as new message if edit fails
+		msg := tgbotapi.NewMessage(message.Chat.ID, reply)
+		bot.Send(msg)
 	}
 }
 
@@ -408,17 +449,32 @@ func handleVoiceMessage(message *tgbotapi.Message) {
 		return
 	}
 
-	context := ""
+	ctxText := ""
 	if message.ReplyToMessage != nil {
-		context = fmt.Sprintf("Context: %s: %s\n\n",
+		ctxText = fmt.Sprintf("Context: %s: %s\n\n",
 			message.ReplyToMessage.From.FirstName,
 			message.ReplyToMessage.Text)
 	}
 	prompt := fmt.Sprintf("%sYou are an assistant in a Telegram chat.\nAnswer this voice message (transcribed):\n\n%s: %s",
-		context, message.From.FirstName, text)
+		ctxText, message.From.FirstName, text)
 
 	userState := getUserState(message.From.ID)
 	log.Printf("Processing voice message from %s (Current Session: %s): %s", message.From.UserName, userState.SessionID, text)
+
+	// Send initial thinking message
+	thinkingMsg := tgbotapi.NewMessage(message.Chat.ID, "Thinking...")
+	if message.ReplyToMessage != nil {
+		thinkingMsg.ReplyToMessageID = message.MessageID
+	}
+	sentMsg, err := bot.Send(thinkingMsg)
+	if err != nil {
+		log.Printf("Error sending thinking message: %v", err)
+	}
+
+	// Start persistent typing indicator with the message ID
+	indicatorCtx, cancelIndicator := context.WithCancel(context.Background())
+	go typingIndicator(indicatorCtx, message.Chat.ID, sentMsg.MessageID)
+	defer cancelIndicator()
 
 	oldSessionID := userState.SessionID
 	reply, newSessionID, modelName := callGemini(prompt, userState.SessionID, "", "")
@@ -434,19 +490,15 @@ func handleVoiceMessage(message *tgbotapi.Message) {
 		reply = fmt.Sprintf("%s\n\n🆔 Session: %s%s", reply, newSessionID, modelSuffix)
 	}
 
-	msg := tgbotapi.NewMessage(message.Chat.ID, reply)
-	// msg.ParseMode = "Markdown" // Removed to prevent formatting errors
-	if message.ReplyToMessage != nil {
-		msg.ReplyToMessageID = message.MessageID
+	editMsg := tgbotapi.NewEditMessageText(message.Chat.ID, sentMsg.MessageID, reply)
+	if _, err := bot.Send(editMsg); err != nil {
+		log.Printf("Error editing message: %v", err)
+		msg := tgbotapi.NewMessage(message.Chat.ID, reply)
+		bot.Send(msg)
 	}
-	bot.Send(msg)
 }
 
 func handlePhotoMessage(message *tgbotapi.Message) {
-	// Send typing indicator
-	typingConfig := tgbotapi.NewChatAction(message.Chat.ID, tgbotapi.ChatTyping)
-	bot.Send(typingConfig)
-
 	// Get the largest photo
 	photo := message.Photo[len(message.Photo)-1]
 	
@@ -465,6 +517,21 @@ func handlePhotoMessage(message *tgbotapi.Message) {
 	userState := getUserState(message.From.ID)
 	log.Printf("Processing photo from %s (Current Session: %s): %s", message.From.UserName, userState.SessionID, prompt)
 
+	// Send initial thinking message
+	thinkingMsg := tgbotapi.NewMessage(message.Chat.ID, "Thinking...")
+	if message.ReplyToMessage != nil {
+		thinkingMsg.ReplyToMessageID = message.MessageID
+	}
+	sentMsg, err := bot.Send(thinkingMsg)
+	if err != nil {
+		log.Printf("Error sending thinking message: %v", err)
+	}
+
+	// Start persistent typing indicator
+	indicatorCtx, cancelIndicator := context.WithCancel(context.Background())
+	go typingIndicator(indicatorCtx, message.Chat.ID, sentMsg.MessageID)
+	defer cancelIndicator()
+
 	oldSessionID := userState.SessionID
 	reply, newSessionID, modelName := callGemini(prompt, userState.SessionID, imageData, "image/jpeg")
 	if newSessionID != "" {
@@ -479,11 +546,12 @@ func handlePhotoMessage(message *tgbotapi.Message) {
 		reply = fmt.Sprintf("%s\n\n🆔 Session: %s%s", reply, newSessionID, modelSuffix)
 	}
 
-	msg := tgbotapi.NewMessage(message.Chat.ID, reply)
-	if message.ReplyToMessage != nil {
-		msg.ReplyToMessageID = message.MessageID
+	editMsg := tgbotapi.NewEditMessageText(message.Chat.ID, sentMsg.MessageID, reply)
+	if _, err := bot.Send(editMsg); err != nil {
+		log.Printf("Error editing message: %v", err)
+		msg := tgbotapi.NewMessage(message.Chat.ID, reply)
+		bot.Send(msg)
 	}
-	bot.Send(msg)
 }
 
 func downloadFileAsBase64(fileID string) (string, error) {
