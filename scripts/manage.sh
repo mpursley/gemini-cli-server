@@ -63,11 +63,9 @@ start_all() {
     fi
 
     # 2. Start bot
-    if [ ! -f "$BOT_BIN" ]; then
-        echo "  - Compiling bot..."
-        cd "$BOT_DIR" && go build -o telegram_bot_bin main.go
-        cd "$REPO_DIR"
-    fi
+    echo "  - Compiling bot..."
+    cd "$BOT_DIR" && go build -o telegram_bot_bin main.go
+    cd "$REPO_DIR"
     
     echo "  - Starting Telegram bot..."
     cd "$BOT_DIR"

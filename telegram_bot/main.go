@@ -90,6 +90,18 @@ func main() {
 	log.Printf("Gemini endpoint: %s", geminiURL)
 	log.Printf("Target chat ID: %d", targetChatID)
 
+	// Register commands
+	commands := []tgbotapi.BotCommand{
+		{Command: "sessions", Description: "List recent sessions"},
+		{Command: "attach", Description: "Attach to a session (e.g. /attach ID)"},
+		{Command: "new", Description: "Start a new session"},
+		{Command: "status", Description: "Show current session status"},
+	}
+	config := tgbotapi.NewSetMyCommands(commands...)
+	if _, err := bot.Request(config); err != nil {
+		log.Printf("Error setting bot commands: %v", err)
+	}
+
 	if geminiAPIKey != "" {
 		log.Printf("Gemini API key loaded from environment")
 	} else {
@@ -170,6 +182,15 @@ func handleMessage(message *tgbotapi.Message) {
 			msg := tgbotapi.NewMessage(message.Chat.ID, "🆕 Started a new session.")
 			bot.Send(msg)
 			return
+		case "/status":
+			sessionID := "None"
+			if userState.SessionID != "" {
+				sessionID = fmt.Sprintf("`%s`", userState.SessionID)
+			}
+			msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("📊 *Bot Status*\n\n🔗 Session: %s\n🎤 Voice: Supported", sessionID))
+			msg.ParseMode = "Markdown"
+			bot.Send(msg)
+			return
 		case "/sessions":
 			handleSessionsCommand(message)
 			return
@@ -188,7 +209,7 @@ func handleMessage(message *tgbotapi.Message) {
 		}
 	}
 
-	log.Printf("Processing message from %s (Session: %s): %s", message.From.UserName, userState.SessionID, text)
+	log.Printf("Processing message from %s (Current Session: %s): %s", message.From.UserName, userState.SessionID, text)
 
 	var prompt string
 	
@@ -203,18 +224,21 @@ func handleMessage(message *tgbotapi.Message) {
 			context, message.From.FirstName, text)
 	
 
-	isNewSession := userState.SessionID == ""
+	oldSessionID := userState.SessionID
 	reply, newSessionID := callGemini(prompt, userState.SessionID)
+	
+	// Update user state with the session ID returned by Gemini
 	if newSessionID != "" {
 		userState.SessionID = newSessionID
 	}
 
-	if isNewSession && newSessionID != "" {
-		reply = fmt.Sprintf("%s\n\n🆔 Session ID: `%s`", reply, newSessionID)
+	// Show session ID if it's new or if we just attached/started
+	if oldSessionID == "" && newSessionID != "" {
+		reply = fmt.Sprintf("%s\n\n🆔 Session: %s", reply, newSessionID)
 	}
 
 	msg := tgbotapi.NewMessage(message.Chat.ID, reply)
-	msg.ParseMode = "Markdown"
+	// msg.ParseMode = "Markdown" // Removed to prevent errors with special characters in Gemini responses
 	if message.ReplyToMessage != nil {
 		msg.ReplyToMessageID = message.MessageID
 	}
@@ -379,20 +403,20 @@ func handleVoiceMessage(message *tgbotapi.Message) {
 		context, message.From.FirstName, text)
 
 	userState := getUserState(message.From.ID)
-	log.Printf("Processing voice message from %s (Session: %s): %s", message.From.UserName, userState.SessionID, text)
+	log.Printf("Processing voice message from %s (Current Session: %s): %s", message.From.UserName, userState.SessionID, text)
 
-	isNewSession := userState.SessionID == ""
+	oldSessionID := userState.SessionID
 	reply, newSessionID := callGemini(prompt, userState.SessionID)
 	if newSessionID != "" {
 		userState.SessionID = newSessionID
 	}
 
-	if isNewSession && newSessionID != "" {
-		reply = fmt.Sprintf("%s\n\n🆔 Session ID: `%s`", reply, newSessionID)
+	if oldSessionID == "" && newSessionID != "" {
+		reply = fmt.Sprintf("%s\n\n🆔 Session: %s", reply, newSessionID)
 	}
 
 	msg := tgbotapi.NewMessage(message.Chat.ID, reply)
-	msg.ParseMode = "Markdown"
+	// msg.ParseMode = "Markdown" // Removed to prevent formatting errors
 	if message.ReplyToMessage != nil {
 		msg.ReplyToMessageID = message.MessageID
 	}
