@@ -77,6 +77,7 @@ start_all() {
     echo "  - Telegram Bot started (PID $(cat "$BOT_PID_FILE"))"
 
     echo "✅ Services are up."
+    echo "   To view logs, run: tail -f /tmp/gemini-listen.log /tmp/telegram-bot.log"
 }
 
 status_all() {
