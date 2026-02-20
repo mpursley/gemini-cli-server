@@ -21,11 +21,14 @@ type GeminiPayload struct {
 	Source    string `json:"source"`
 	Message   string `json:"message"`
 	SessionID string `json:"sessionId,omitempty"`
+	ImageData string `json:"imageData,omitempty"`
+	MimeType  string `json:"mimeType,omitempty"`
 }
 
 type GeminiResponse struct {
 	Reply     string `json:"reply"`
 	SessionID string `json:"sessionId"`
+	Model     string `json:"model"`
 }
 
 type CommandConfig struct {
@@ -162,6 +165,12 @@ func handleMessage(message *tgbotapi.Message) {
 		return
 	}
 
+	// Handle photo messages
+	if message.Photo != nil && len(message.Photo) > 0 {
+		handlePhotoMessage(message)
+		return
+	}
+
 	text := strings.TrimSpace(message.Text)
 	if text == "" {
 		return
@@ -225,7 +234,7 @@ func handleMessage(message *tgbotapi.Message) {
 	
 
 	oldSessionID := userState.SessionID
-	reply, newSessionID := callGemini(prompt, userState.SessionID)
+	reply, newSessionID, modelName := callGemini(prompt, userState.SessionID, "", "")
 	
 	// Update user state with the session ID returned by Gemini
 	if newSessionID != "" {
@@ -234,7 +243,11 @@ func handleMessage(message *tgbotapi.Message) {
 
 	// Show session ID if it's new or if we just attached/started
 	if oldSessionID == "" && newSessionID != "" {
-		reply = fmt.Sprintf("%s\n\n🆔 Session: %s", reply, newSessionID)
+		modelSuffix := ""
+		if modelName != "" {
+			modelSuffix = fmt.Sprintf(" (%s)", modelName)
+		}
+		reply = fmt.Sprintf("%s\n\n🆔 Session: %s%s", reply, newSessionID, modelSuffix)
 	}
 
 	msg := tgbotapi.NewMessage(message.Chat.ID, reply)
@@ -302,17 +315,19 @@ func fetchSessions() ([]Session, error) {
 	return sessResp.Sessions, nil
 }
 
-func callGemini(prompt string, sessionId string) (string, string) {
+func callGemini(prompt string, sessionId string, imageData string, mimeType string) (string, string, string) {
 	payload := GeminiPayload{
 		Source:    "telegram",
 		Message:   prompt,
 		SessionID: sessionId,
+		ImageData: imageData,
+		MimeType:  mimeType,
 	}
 
 	jsonData, err := json.Marshal(payload)
 	if err != nil {
 		log.Printf("Error marshaling JSON: %v", err)
-		return "❌ Error processing request", ""
+		return "❌ Error processing request", "", ""
 	}
 
 	client := &http.Client{Timeout: 300 * time.Second}
@@ -320,26 +335,26 @@ func callGemini(prompt string, sessionId string) (string, string) {
 	resp, err := client.Post(geminiURL, "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
 		log.Printf("Error calling Gemini: %v", err)
-		return fmt.Sprintf("❌ Error from Gemini server: %v", err), ""
+		return fmt.Sprintf("❌ Error from Gemini server: %v", err), "", ""
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		log.Printf("Gemini returned status %d", resp.StatusCode)
-		return fmt.Sprintf("❌ Gemini server error: %d", resp.StatusCode), ""
+		return fmt.Sprintf("❌ Gemini server error: %d", resp.StatusCode), "", ""
 	}
 
 	var geminiResp GeminiResponse
 	if err := json.NewDecoder(resp.Body).Decode(&geminiResp); err != nil {
 		log.Printf("Error decoding response: %v", err)
-		return "❌ Error parsing response", ""
+		return "❌ Error parsing response", "", ""
 	}
 
 	if geminiResp.Reply == "" {
-		return "No reply.", geminiResp.SessionID
+		return "No reply.", geminiResp.SessionID, geminiResp.Model
 	}
 
-	return geminiResp.Reply, geminiResp.SessionID
+	return geminiResp.Reply, geminiResp.SessionID, geminiResp.Model
 }
 
 func handleVoiceMessage(message *tgbotapi.Message) {
@@ -406,13 +421,17 @@ func handleVoiceMessage(message *tgbotapi.Message) {
 	log.Printf("Processing voice message from %s (Current Session: %s): %s", message.From.UserName, userState.SessionID, text)
 
 	oldSessionID := userState.SessionID
-	reply, newSessionID := callGemini(prompt, userState.SessionID)
+	reply, newSessionID, modelName := callGemini(prompt, userState.SessionID, "", "")
 	if newSessionID != "" {
 		userState.SessionID = newSessionID
 	}
 
 	if oldSessionID == "" && newSessionID != "" {
-		reply = fmt.Sprintf("%s\n\n🆔 Session: %s", reply, newSessionID)
+		modelSuffix := ""
+		if modelName != "" {
+			modelSuffix = fmt.Sprintf(" (%s)", modelName)
+		}
+		reply = fmt.Sprintf("%s\n\n🆔 Session: %s%s", reply, newSessionID, modelSuffix)
 	}
 
 	msg := tgbotapi.NewMessage(message.Chat.ID, reply)
@@ -421,6 +440,75 @@ func handleVoiceMessage(message *tgbotapi.Message) {
 		msg.ReplyToMessageID = message.MessageID
 	}
 	bot.Send(msg)
+}
+
+func handlePhotoMessage(message *tgbotapi.Message) {
+	// Send typing indicator
+	typingConfig := tgbotapi.NewChatAction(message.Chat.ID, tgbotapi.ChatTyping)
+	bot.Send(typingConfig)
+
+	// Get the largest photo
+	photo := message.Photo[len(message.Photo)-1]
+	
+	imageData, err := downloadFileAsBase64(photo.FileID)
+	if err != nil {
+		msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("❌ Error downloading photo: %v", err))
+		bot.Send(msg)
+		return
+	}
+
+	prompt := message.Caption
+	if prompt == "" {
+		prompt = "What is in this image?"
+	}
+
+	userState := getUserState(message.From.ID)
+	log.Printf("Processing photo from %s (Current Session: %s): %s", message.From.UserName, userState.SessionID, prompt)
+
+	oldSessionID := userState.SessionID
+	reply, newSessionID, modelName := callGemini(prompt, userState.SessionID, imageData, "image/jpeg")
+	if newSessionID != "" {
+		userState.SessionID = newSessionID
+	}
+
+	if oldSessionID == "" && newSessionID != "" {
+		modelSuffix := ""
+		if modelName != "" {
+			modelSuffix = fmt.Sprintf(" (%s)", modelName)
+		}
+		reply = fmt.Sprintf("%s\n\n🆔 Session: %s%s", reply, newSessionID, modelSuffix)
+	}
+
+	msg := tgbotapi.NewMessage(message.Chat.ID, reply)
+	if message.ReplyToMessage != nil {
+		msg.ReplyToMessageID = message.MessageID
+	}
+	bot.Send(msg)
+}
+
+func downloadFileAsBase64(fileID string) (string, error) {
+	file, err := bot.GetFile(tgbotapi.FileConfig{FileID: fileID})
+	if err != nil {
+		return "", err
+	}
+
+	fileURL := file.Link(bot.Token)
+	resp, err := http.Get(fileURL)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("failed to download: %d", resp.StatusCode)
+	}
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	return base64.StdEncoding.EncodeToString(data), nil
 }
 
 func handleAPIKeyInput(message *tgbotapi.Message) {
