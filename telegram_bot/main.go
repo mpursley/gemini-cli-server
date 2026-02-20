@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -21,11 +22,14 @@ type GeminiPayload struct {
 	Source    string `json:"source"`
 	Message   string `json:"message"`
 	SessionID string `json:"sessionId,omitempty"`
+	ImageData string `json:"imageData,omitempty"`
+	MimeType  string `json:"mimeType,omitempty"`
 }
 
 type GeminiResponse struct {
 	Reply     string `json:"reply"`
 	SessionID string `json:"sessionId"`
+	Model     string `json:"model"`
 }
 
 type CommandConfig struct {
@@ -90,6 +94,18 @@ func main() {
 	log.Printf("Gemini endpoint: %s", geminiURL)
 	log.Printf("Target chat ID: %d", targetChatID)
 
+	// Register commands
+	commands := []tgbotapi.BotCommand{
+		{Command: "sessions", Description: "List recent sessions"},
+		{Command: "attach", Description: "Attach to a session (e.g. /attach ID)"},
+		{Command: "new", Description: "Start a new session"},
+		{Command: "status", Description: "Show current session status"},
+	}
+	config := tgbotapi.NewSetMyCommands(commands...)
+	if _, err := bot.Request(config); err != nil {
+		log.Printf("Error setting bot commands: %v", err)
+	}
+
 	if geminiAPIKey != "" {
 		log.Printf("Gemini API key loaded from environment")
 	} else {
@@ -108,12 +124,53 @@ func main() {
 	}
 }
 
+func typingIndicator(ctx context.Context, chatID int64, messageID int) {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	dots := "..."
+	seconds := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			seconds++
+			dots += "."
+			if len(dots) > 15 {
+				dots = "..."
+			}
+			// Update the message text with seconds and dots
+			text := fmt.Sprintf("Thinking (%d seconds) %s", seconds, dots)
+			editMsg := tgbotapi.NewEditMessageText(chatID, messageID, text)
+			bot.Send(editMsg)
+			
+			// Refresh the telegram "typing" status every few seconds (it lasts ~5s)
+			if seconds%5 == 0 {
+				bot.Send(tgbotapi.NewChatAction(chatID, tgbotapi.ChatTyping))
+			}
+		}
+	}
+}
+
 func getUserState(userID int64) *UserState {
 	if state, exists := userStates[userID]; exists {
 		return state
 	}
 	userStates[userID] = &UserState{}
 	return userStates[userID]
+}
+
+type Session struct {
+	ID          string `json:"id"`
+	Description string `json:"description"`
+	Time        string `json:"time"`
+}
+
+type SessionsResponse struct {
+	Ok       bool      `json:"ok"`
+	Sessions []Session `json:"sessions"`
+	Error    string    `json:"error,omitempty"`
 }
 
 func handleMessage(message *tgbotapi.Message) {
@@ -138,58 +195,180 @@ func handleMessage(message *tgbotapi.Message) {
 		return
 	}
 
+	// Handle photo messages
+	if message.Photo != nil && len(message.Photo) > 0 {
+		handlePhotoMessage(message)
+		return
+	}
+
 	text := strings.TrimSpace(message.Text)
 	if text == "" {
 		return
 	}
 
-	log.Printf("Processing message from %s (Session: %s): %s", message.From.UserName, userState.SessionID, text)
+	// Handle Commands
+	if strings.HasPrefix(text, "/") {
+		parts := strings.Fields(text)
+		command := parts[0]
+
+		switch command {
+		case "/start":
+			msg := tgbotapi.NewMessage(message.Chat.ID, "👋 Welcome! I'm your Gemini assistant. Send me a message or a voice note to get started.\n\nCommands:\n/sessions - List recent sessions\n/attach <id> - Attach to a session\n/new - Start a new session")
+			bot.Send(msg)
+			return
+		case "/new":
+			userState.SessionID = ""
+			msg := tgbotapi.NewMessage(message.Chat.ID, "🆕 Started a new session.")
+			bot.Send(msg)
+			return
+		case "/status":
+			sessionID := "None"
+			if userState.SessionID != "" {
+				sessionID = fmt.Sprintf("`%s`", userState.SessionID)
+			}
+			msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("📊 *Bot Status*\n\n🔗 Session: %s\n🎤 Voice: Supported", sessionID))
+			msg.ParseMode = "Markdown"
+			bot.Send(msg)
+			return
+		case "/sessions":
+			handleSessionsCommand(message)
+			return
+		case "/attach":
+			if len(parts) < 2 {
+				msg := tgbotapi.NewMessage(message.Chat.ID, "❌ Please provide a session ID. Example: `/attach 8a3d000a...`")
+				msg.ParseMode = "Markdown"
+				bot.Send(msg)
+				return
+			}
+			userState.SessionID = parts[1]
+			msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("🔗 Attached to session: `%s`", userState.SessionID))
+			msg.ParseMode = "Markdown"
+			bot.Send(msg)
+			return
+		}
+	}
+
+	log.Printf("Processing message from %s (Current Session: %s): %s", message.From.UserName, userState.SessionID, text)
 
 	var prompt string
-	
-		
-		context := ""
-		if message.ReplyToMessage != nil {
-			context = fmt.Sprintf("Context: %s: %s\n\n",
-				message.ReplyToMessage.From.FirstName,
-				message.ReplyToMessage.Text)
-		}
-		prompt = fmt.Sprintf("%sYou are an assistant in a Telegram chat.\nAnswer this message:\n\n%s: %s",
-			context, message.From.FirstName, text)
-	
+	ctxText := ""
+	if message.ReplyToMessage != nil {
+		ctxText = fmt.Sprintf("Context: %s: %s\n\n",
+			message.ReplyToMessage.From.FirstName,
+			message.ReplyToMessage.Text)
+	}
+	prompt = fmt.Sprintf("%sYou are an assistant in a Telegram chat.\nAnswer this message:\n\n%s: %s",
+		ctxText, message.From.FirstName, text)
 
-	isNewSession := userState.SessionID == ""
-	reply, newSessionID := callGemini(prompt, userState.SessionID)
+	// Send initial thinking message
+	thinkingMsg := tgbotapi.NewMessage(message.Chat.ID, "Thinking...")
+	if message.ReplyToMessage != nil {
+		thinkingMsg.ReplyToMessageID = message.MessageID
+	}
+	sentMsg, err := bot.Send(thinkingMsg)
+	if err != nil {
+		log.Printf("Error sending thinking message: %v", err)
+	}
+
+	// Start typing indicator with the sent message ID
+	ctx, cancel := context.WithCancel(context.Background())
+	go typingIndicator(ctx, message.Chat.ID, sentMsg.MessageID)
+	defer cancel()
+
+	oldSessionID := userState.SessionID
+	reply, newSessionID, modelName := callGemini(prompt, userState.SessionID, "", "")
+	
+	// Update user state with the session ID returned by Gemini
 	if newSessionID != "" {
 		userState.SessionID = newSessionID
 	}
 
-	if isNewSession && newSessionID != "" {
-		reply = fmt.Sprintf("%s\n\n🆔 Session ID: `%s`", reply, newSessionID)
+	// Show session ID if it's new or if we just attached/started
+	if oldSessionID == "" && newSessionID != "" {
+		modelSuffix := ""
+		if modelName != "" {
+			modelSuffix = fmt.Sprintf(" (%s)", modelName)
+		}
+		reply = fmt.Sprintf("%s\n\n🆔 Session: %s%s", reply, newSessionID, modelSuffix)
 	}
 
-	msg := tgbotapi.NewMessage(message.Chat.ID, reply)
-	msg.ParseMode = "Markdown"
-	if message.ReplyToMessage != nil {
-		msg.ReplyToMessageID = message.MessageID
-	}
-
-	if _, err := bot.Send(msg); err != nil {
-		log.Printf("Error sending message: %v", err)
+	// Edit the thinking message with the actual reply
+	editMsg := tgbotapi.NewEditMessageText(message.Chat.ID, sentMsg.MessageID, reply)
+	if _, err := bot.Send(editMsg); err != nil {
+		log.Printf("Error editing message: %v", err)
+		// Fallback: send as new message if edit fails
+		msg := tgbotapi.NewMessage(message.Chat.ID, reply)
+		bot.Send(msg)
 	}
 }
 
-func callGemini(prompt string, sessionId string) (string, string) {
+func handleSessionsCommand(message *tgbotapi.Message) {
+	sessions, err := fetchSessions()
+	if err != nil {
+		msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("❌ Error fetching sessions: %v", err))
+		bot.Send(msg)
+		return
+	}
+
+	if len(sessions) == 0 {
+		msg := tgbotapi.NewMessage(message.Chat.ID, "📭 No recent sessions found.")
+		bot.Send(msg)
+		return
+	}
+
+	var sb strings.Builder
+	sb.WriteString("📋 *Recent Sessions:*\n\n")
+	for i, s := range sessions {
+		if i >= 10 { // Limit to top 10
+			break
+		}
+		description := s.Description
+		if len(description) > 50 {
+			description = description[:47] + "..."
+		}
+		sb.WriteString(fmt.Sprintf("%d. %s\n   _Time: %s_\n   ID: `/attach %s`\n\n", i+1, description, s.Time, s.ID))
+	}
+
+	msg := tgbotapi.NewMessage(message.Chat.ID, sb.String())
+	msg.ParseMode = "Markdown"
+	bot.Send(msg)
+}
+
+func fetchSessions() ([]Session, error) {
+	// Update URL for sessions endpoint
+	sessionsURL := strings.Replace(geminiURL, "/event", "/sessions", 1)
+	
+	resp, err := http.Get(sessionsURL)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var sessResp SessionsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&sessResp); err != nil {
+		return nil, err
+	}
+
+	if !sessResp.Ok {
+		return nil, fmt.Errorf(sessResp.Error)
+	}
+
+	return sessResp.Sessions, nil
+}
+
+func callGemini(prompt string, sessionId string, imageData string, mimeType string) (string, string, string) {
 	payload := GeminiPayload{
 		Source:    "telegram",
 		Message:   prompt,
 		SessionID: sessionId,
+		ImageData: imageData,
+		MimeType:  mimeType,
 	}
 
 	jsonData, err := json.Marshal(payload)
 	if err != nil {
 		log.Printf("Error marshaling JSON: %v", err)
-		return "❌ Error processing request", ""
+		return "❌ Error processing request", "", ""
 	}
 
 	client := &http.Client{Timeout: 300 * time.Second}
@@ -197,26 +376,26 @@ func callGemini(prompt string, sessionId string) (string, string) {
 	resp, err := client.Post(geminiURL, "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
 		log.Printf("Error calling Gemini: %v", err)
-		return fmt.Sprintf("❌ Error from Gemini server: %v", err), ""
+		return fmt.Sprintf("❌ Error from Gemini server: %v", err), "", ""
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		log.Printf("Gemini returned status %d", resp.StatusCode)
-		return fmt.Sprintf("❌ Gemini server error: %d", resp.StatusCode), ""
+		return fmt.Sprintf("❌ Gemini server error: %d", resp.StatusCode), "", ""
 	}
 
 	var geminiResp GeminiResponse
 	if err := json.NewDecoder(resp.Body).Decode(&geminiResp); err != nil {
 		log.Printf("Error decoding response: %v", err)
-		return "❌ Error parsing response", ""
+		return "❌ Error parsing response", "", ""
 	}
 
 	if geminiResp.Reply == "" {
-		return "No reply.", geminiResp.SessionID
+		return "No reply.", geminiResp.SessionID, geminiResp.Model
 	}
 
-	return geminiResp.Reply, geminiResp.SessionID
+	return geminiResp.Reply, geminiResp.SessionID, geminiResp.Model
 }
 
 func handleVoiceMessage(message *tgbotapi.Message) {
@@ -270,34 +449,134 @@ func handleVoiceMessage(message *tgbotapi.Message) {
 		return
 	}
 
-	context := ""
+	ctxText := ""
 	if message.ReplyToMessage != nil {
-		context = fmt.Sprintf("Context: %s: %s\n\n",
+		ctxText = fmt.Sprintf("Context: %s: %s\n\n",
 			message.ReplyToMessage.From.FirstName,
 			message.ReplyToMessage.Text)
 	}
 	prompt := fmt.Sprintf("%sYou are an assistant in a Telegram chat.\nAnswer this voice message (transcribed):\n\n%s: %s",
-		context, message.From.FirstName, text)
+		ctxText, message.From.FirstName, text)
 
 	userState := getUserState(message.From.ID)
-	log.Printf("Processing voice message from %s (Session: %s): %s", message.From.UserName, userState.SessionID, text)
+	log.Printf("Processing voice message from %s (Current Session: %s): %s", message.From.UserName, userState.SessionID, text)
 
-	isNewSession := userState.SessionID == ""
-	reply, newSessionID := callGemini(prompt, userState.SessionID)
+	// Send initial thinking message
+	thinkingMsg := tgbotapi.NewMessage(message.Chat.ID, "Thinking...")
+	if message.ReplyToMessage != nil {
+		thinkingMsg.ReplyToMessageID = message.MessageID
+	}
+	sentMsg, err := bot.Send(thinkingMsg)
+	if err != nil {
+		log.Printf("Error sending thinking message: %v", err)
+	}
+
+	// Start persistent typing indicator with the message ID
+	indicatorCtx, cancelIndicator := context.WithCancel(context.Background())
+	go typingIndicator(indicatorCtx, message.Chat.ID, sentMsg.MessageID)
+	defer cancelIndicator()
+
+	oldSessionID := userState.SessionID
+	reply, newSessionID, modelName := callGemini(prompt, userState.SessionID, "", "")
 	if newSessionID != "" {
 		userState.SessionID = newSessionID
 	}
 
-	if isNewSession && newSessionID != "" {
-		reply = fmt.Sprintf("%s\n\n🆔 Session ID: `%s`", reply, newSessionID)
+	if oldSessionID == "" && newSessionID != "" {
+		modelSuffix := ""
+		if modelName != "" {
+			modelSuffix = fmt.Sprintf(" (%s)", modelName)
+		}
+		reply = fmt.Sprintf("%s\n\n🆔 Session: %s%s", reply, newSessionID, modelSuffix)
 	}
 
-	msg := tgbotapi.NewMessage(message.Chat.ID, reply)
-	msg.ParseMode = "Markdown"
-	if message.ReplyToMessage != nil {
-		msg.ReplyToMessageID = message.MessageID
+	editMsg := tgbotapi.NewEditMessageText(message.Chat.ID, sentMsg.MessageID, reply)
+	if _, err := bot.Send(editMsg); err != nil {
+		log.Printf("Error editing message: %v", err)
+		msg := tgbotapi.NewMessage(message.Chat.ID, reply)
+		bot.Send(msg)
 	}
-	bot.Send(msg)
+}
+
+func handlePhotoMessage(message *tgbotapi.Message) {
+	// Get the largest photo
+	photo := message.Photo[len(message.Photo)-1]
+	
+	imageData, err := downloadFileAsBase64(photo.FileID)
+	if err != nil {
+		msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("❌ Error downloading photo: %v", err))
+		bot.Send(msg)
+		return
+	}
+
+	prompt := message.Caption
+	if prompt == "" {
+		prompt = "What is in this image?"
+	}
+
+	userState := getUserState(message.From.ID)
+	log.Printf("Processing photo from %s (Current Session: %s): %s", message.From.UserName, userState.SessionID, prompt)
+
+	// Send initial thinking message
+	thinkingMsg := tgbotapi.NewMessage(message.Chat.ID, "Thinking...")
+	if message.ReplyToMessage != nil {
+		thinkingMsg.ReplyToMessageID = message.MessageID
+	}
+	sentMsg, err := bot.Send(thinkingMsg)
+	if err != nil {
+		log.Printf("Error sending thinking message: %v", err)
+	}
+
+	// Start persistent typing indicator
+	indicatorCtx, cancelIndicator := context.WithCancel(context.Background())
+	go typingIndicator(indicatorCtx, message.Chat.ID, sentMsg.MessageID)
+	defer cancelIndicator()
+
+	oldSessionID := userState.SessionID
+	reply, newSessionID, modelName := callGemini(prompt, userState.SessionID, imageData, "image/jpeg")
+	if newSessionID != "" {
+		userState.SessionID = newSessionID
+	}
+
+	if oldSessionID == "" && newSessionID != "" {
+		modelSuffix := ""
+		if modelName != "" {
+			modelSuffix = fmt.Sprintf(" (%s)", modelName)
+		}
+		reply = fmt.Sprintf("%s\n\n🆔 Session: %s%s", reply, newSessionID, modelSuffix)
+	}
+
+	editMsg := tgbotapi.NewEditMessageText(message.Chat.ID, sentMsg.MessageID, reply)
+	if _, err := bot.Send(editMsg); err != nil {
+		log.Printf("Error editing message: %v", err)
+		msg := tgbotapi.NewMessage(message.Chat.ID, reply)
+		bot.Send(msg)
+	}
+}
+
+func downloadFileAsBase64(fileID string) (string, error) {
+	file, err := bot.GetFile(tgbotapi.FileConfig{FileID: fileID})
+	if err != nil {
+		return "", err
+	}
+
+	fileURL := file.Link(bot.Token)
+	resp, err := http.Get(fileURL)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("failed to download: %d", resp.StatusCode)
+	}
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	return base64.StdEncoding.EncodeToString(data), nil
 }
 
 func handleAPIKeyInput(message *tgbotapi.Message) {

@@ -1,1 +1,7 @@
 .env
+uploads/
+tmp/
+*.db
+*_bin
+.DS_Store
+screenshots/
