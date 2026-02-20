@@ -20,6 +20,16 @@ git clone https://github.com/bravian1/gemini_cli_server.git
 
 After cloning, copy both the `commands` and `scripts` folders into your `.gemini` directory. This ensures the Gemini CLI can access the necessary configurations and scripts for the Telegram bot integration.
 
+## 🚀 New: Session History Support
+
+The Gemini CLI Server now automatically maintains conversation history per Telegram user. This means the bot will "remember" previous parts of your conversation, allowing for more natural and contextual "vibe coding" on the go.
+
+- **Automatic Persistence:** Each user has their own dedicated session managed by the Gemini CLI.
+- **Native Resumption:** The bot uses the Gemini CLI's `--resume` flag internally to maintain context.
+- **Local Management:** You can still use the standard Gemini CLI commands on your machine to list or resume these sessions:
+    - `gemini --list-sessions`
+    - `gemini --resume <session_id>`
+
 ## Core Components and Interaction
 
 This integration relies on two main components:

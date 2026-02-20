@@ -18,12 +18,14 @@ import (
 )
 
 type GeminiPayload struct {
-	Source  string `json:"source"`
-	Message string `json:"message"`
+	Source    string `json:"source"`
+	Message   string `json:"message"`
+	SessionID string `json:"sessionId,omitempty"`
 }
 
 type GeminiResponse struct {
-	Reply string `json:"reply"`
+	Reply     string `json:"reply"`
+	SessionID string `json:"sessionId"`
 }
 
 type CommandConfig struct {
@@ -31,7 +33,8 @@ type CommandConfig struct {
 }
 
 type UserState struct {
-	State string
+	State     string
+	SessionID string
 }
 
 var (
@@ -155,7 +158,10 @@ func handleMessage(message *tgbotapi.Message) {
 			context, message.From.FirstName, text)
 	
 
-	reply := callGemini(prompt)
+	reply, newSessionID := callGemini(prompt, userState.SessionID)
+	if newSessionID != "" {
+		userState.SessionID = newSessionID
+	}
 
 	msg := tgbotapi.NewMessage(message.Chat.ID, reply)
 	if message.ReplyToMessage != nil {
@@ -167,16 +173,17 @@ func handleMessage(message *tgbotapi.Message) {
 	}
 }
 
-func callGemini(prompt string) string {
+func callGemini(prompt string, sessionId string) (string, string) {
 	payload := GeminiPayload{
-		Source:  "telegram",
-		Message: prompt,
+		Source:    "telegram",
+		Message:   prompt,
+		SessionID: sessionId,
 	}
 
 	jsonData, err := json.Marshal(payload)
 	if err != nil {
 		log.Printf("Error marshaling JSON: %v", err)
-		return "❌ Error processing request"
+		return "❌ Error processing request", ""
 	}
 
 	client := &http.Client{Timeout: 300 * time.Second}
@@ -184,26 +191,26 @@ func callGemini(prompt string) string {
 	resp, err := client.Post(geminiURL, "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
 		log.Printf("Error calling Gemini: %v", err)
-		return fmt.Sprintf("❌ Error from Gemini server: %v", err)
+		return fmt.Sprintf("❌ Error from Gemini server: %v", err), ""
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		log.Printf("Gemini returned status %d", resp.StatusCode)
-		return fmt.Sprintf("❌ Gemini server error: %d", resp.StatusCode)
+		return fmt.Sprintf("❌ Gemini server error: %d", resp.StatusCode), ""
 	}
 
 	var geminiResp GeminiResponse
 	if err := json.NewDecoder(resp.Body).Decode(&geminiResp); err != nil {
 		log.Printf("Error decoding response: %v", err)
-		return "❌ Error parsing response"
+		return "❌ Error parsing response", ""
 	}
 
 	if geminiResp.Reply == "" {
-		return "No reply."
+		return "No reply.", geminiResp.SessionID
 	}
 
-	return geminiResp.Reply
+	return geminiResp.Reply, geminiResp.SessionID
 }
 
 func handleVoiceMessage(message *tgbotapi.Message) {
@@ -266,7 +273,11 @@ func handleVoiceMessage(message *tgbotapi.Message) {
 	prompt := fmt.Sprintf("%sYou are an assistant in a Telegram chat.\nAnswer this voice message (transcribed):\n\n%s: %s",
 		context, message.From.FirstName, text)
 
-	reply := callGemini(prompt)
+	userState := getUserState(message.From.ID)
+	reply, newSessionID := callGemini(prompt, userState.SessionID)
+	if newSessionID != "" {
+		userState.SessionID = newSessionID
+	}
 	msg := tgbotapi.NewMessage(message.Chat.ID, reply)
 	if message.ReplyToMessage != nil {
 		msg.ReplyToMessageID = message.MessageID

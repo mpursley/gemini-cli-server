@@ -8,14 +8,35 @@ const port = Number(process.argv[2] || process.env.PORT || 8765);
 
 
 
-function runGemini(prompt) {
+function runGemini(prompt, sessionId = null) {
   return new Promise((resolve, reject) => {
-    const args = ['--yolo', '--prompt', prompt, '-m', "gemini-2.5-flash"];
+    const args = ["--yolo", "--prompt", prompt, "-m", "gemini-2.5-flash", "--output-format", "json"];
+    if (sessionId) {
+      args.push("--resume", sessionId);
+    }
     const p = spawn("gemini", args, { stdio: ["ignore", "pipe", "pipe"] });
     let out = "", err = "";
     p.stdout.on("data", d => (out += d.toString()));
     p.stderr.on("data", d => (err += d.toString()));
-    p.on("close", code => (code === 0 ? resolve(out.trim()) : reject(new Error(err || `exit ${code}`))));
+    p.on("close", code => {
+      if (code === 0 || code === null) {
+        try {
+          // Find the start of the JSON object in case of warnings/logs
+          const jsonStart = out.indexOf('{\n  "session_id"');
+          if (jsonStart === -1) {
+            resolve({ reply: out.trim(), session_id: sessionId });
+          } else {
+            const jsonStr = out.substring(jsonStart);
+            const parsed = JSON.parse(jsonStr);
+            resolve({ reply: parsed.response, session_id: parsed.session_id });
+          }
+        } catch (e) {
+          resolve({ reply: out.trim(), session_id: sessionId });
+        }
+      } else {
+        reject(new Error(err || `exit ${code}`));
+      }
+    });
   });
 }
 
@@ -38,18 +59,17 @@ const server = http.createServer((req, res) => {
 
       const source = parsed.source || "unknown";
       const message = parsed.message || "";
+      const sessionId = parsed.sessionId || null;
 
       if (!message) {
         res.writeHead(400, { "Content-Type": "application/json" });
         return res.end(JSON.stringify({ ok: false, error: "No message provided" }));
       }
 
-
-
       try {
-        const reply = await runGemini(message);
+        const result = await runGemini(message, sessionId);
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ ok: true, reply }));
+        res.end(JSON.stringify({ ok: true, reply: result.reply, sessionId: result.session_id }));
       } catch (e) {
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: false, error: String(e.message || e) }));
