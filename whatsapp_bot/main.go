@@ -185,136 +185,140 @@ func handler(rawEvt interface{}) {
 	case *events.Connected:
 		log.Printf("WhatsApp bot connected and ready. My JID: %s", client.Store.ID.String())
 	case *events.Message:
-		// Debug logging to understand why messages might be ignored
-		sender := evt.Info.Sender.String()
+		// Process message in a goroutine so we don't block the main event loop
+		// and avoid the "Node handling is taking long" warning/timeout.
+		go func(evt *events.Message) {
+			// Debug logging to understand why messages might be ignored
+			sender := evt.Info.Sender.String()
 
-		// If it's from us, usually we ignore. 
-		// BUT if it's from the user's LID account (even if marked FromMe), we want to process it.
-		isUserLID := strings.Contains(sender, "229712718741576")
-		
-		if evt.Info.IsFromMe && !isUserLID {
-			return
-		}
-
-		// Also ignore edits to avoid responding to our own "Thinking..." updates
-		// (Unless it's from the user's LID, but usually users don't "edit" into a loop)
-		if evt.Message.GetProtocolMessage().GetType() == waE2E.ProtocolMessage_MESSAGE_EDIT && !isUserLID {
-			return
-		}
-
-		if targetJID != "" && !strings.Contains(sender, targetJID) {
-			log.Printf("Ignoring message from %s (targetJID filter)", sender)
-			return
-		}
-
-		jid := sender
-		sessionID := userSessions[jid]
-
-		// 1. Handle Images
-		var imageData, mimeType string
-		if img := evt.Message.GetImageMessage(); img != nil {
-			data, err := client.Download(context.Background(), img)
-			if err != nil {
-				log.Printf("Failed to download image: %v", err)
-			} else {
-				imageData = base64.StdEncoding.EncodeToString(data)
-				mimeType = img.GetMimetype()
+			// If it's from us, usually we ignore. 
+			// BUT if it's from the user's LID account (even if marked FromMe), we want to process it.
+			isUserLID := strings.Contains(sender, "229712718741576")
+			
+			if evt.Info.IsFromMe && !isUserLID {
+				return
 			}
-		}
 
-		// 2. Handle Text
-		text := ""
-		if msg := evt.Message.GetConversation(); msg != "" {
-			text = msg
-		} else if msg := evt.Message.GetExtendedTextMessage().GetText(); msg != "" {
-			text = msg
-		} else if msg := evt.Message.GetImageMessage().GetCaption(); msg != "" {
-			text = msg
-		}
-
-		if text == "" && imageData == "" {
-			return
-		}
-
-		// 3. Handle Commands
-		if strings.HasPrefix(text, "/") {
-			parts := strings.Fields(text)
-			cmd := parts[0]
-			switch cmd {
-			case "/new":
-				userSessions[jid] = ""
-				client.SendMessage(context.Background(), evt.Info.Chat, &waE2E.Message{Conversation: strPtr("🆕 Started a new session.")})
+			// Also ignore edits to avoid responding to our own "Thinking..." updates
+			// (Unless it's from the user's LID, but usually users don't "edit" into a loop)
+			if evt.Message.GetProtocolMessage().GetType() == waE2E.ProtocolMessage_MESSAGE_EDIT && !isUserLID {
 				return
-			case "/status":
-				sID := "None"
-				if sessionID != "" {
-					sID = sessionID
+			}
+
+			if targetJID != "" && !strings.Contains(sender, targetJID) {
+				log.Printf("Ignoring message from %s (targetJID filter)", sender)
+				return
+			}
+
+			jid := sender
+			sessionID := userSessions[jid]
+
+			// 1. Handle Images
+			var imageData, mimeType string
+			if img := evt.Message.GetImageMessage(); img != nil {
+				data, err := client.Download(context.Background(), img)
+				if err != nil {
+					log.Printf("Failed to download image: %v", err)
+				} else {
+					imageData = base64.StdEncoding.EncodeToString(data)
+					mimeType = img.GetMimetype()
 				}
-				statusMsg := fmt.Sprintf("📊 *WhatsApp Bot Status*\n\n🔗 Session: %s", sID)
-				client.SendMessage(context.Background(), evt.Info.Chat, &waE2E.Message{Conversation: &statusMsg})
+			}
+
+			// 2. Handle Text
+			text := ""
+			if msg := evt.Message.GetConversation(); msg != "" {
+				text = msg
+			} else if msg := evt.Message.GetExtendedTextMessage().GetText(); msg != "" {
+				text = msg
+			} else if msg := evt.Message.GetImageMessage().GetCaption(); msg != "" {
+				text = msg
+			}
+
+			if text == "" && imageData == "" {
 				return
-			case "/sessions":
-				handleSessionsCommand(evt)
-				return
-			case "/attach":
-				if len(parts) < 2 {
-					msg := "❌ Please provide a session ID. Example: /attach 8a3d..."
+			}
+
+			// 3. Handle Commands
+			if strings.HasPrefix(text, "/") {
+				parts := strings.Fields(text)
+				cmd := parts[0]
+				switch cmd {
+				case "/new":
+					userSessions[jid] = ""
+					client.SendMessage(context.Background(), evt.Info.Chat, &waE2E.Message{Conversation: strPtr("🆕 Started a new session.")})
+					return
+				case "/status":
+					sID := "None"
+					if sessionID != "" {
+						sID = sessionID
+					}
+					statusMsg := fmt.Sprintf("📊 *WhatsApp Bot Status*\n\n🔗 Session: %s", sID)
+					client.SendMessage(context.Background(), evt.Info.Chat, &waE2E.Message{Conversation: &statusMsg})
+					return
+				case "/sessions":
+					handleSessionsCommand(evt)
+					return
+				case "/attach":
+					if len(parts) < 2 {
+						msg := "❌ Please provide a session ID. Example: /attach 8a3d..."
+						client.SendMessage(context.Background(), evt.Info.Chat, &waE2E.Message{Conversation: &msg})
+						return
+					}
+					userSessions[jid] = parts[1]
+					msg := fmt.Sprintf("🔗 Attached to session: %s", parts[1])
 					client.SendMessage(context.Background(), evt.Info.Chat, &waE2E.Message{Conversation: &msg})
 					return
 				}
-				userSessions[jid] = parts[1]
-				msg := fmt.Sprintf("🔗 Attached to session: %s", parts[1])
-				client.SendMessage(context.Background(), evt.Info.Chat, &waE2E.Message{Conversation: &msg})
-				return
 			}
-		}
 
-		log.Printf("Processing WhatsApp message from %s (Session: %s): %s", jid, sessionID, text)
+			log.Printf("Processing WhatsApp message from %s (Session: %s): %s", jid, sessionID, text)
 
-		prompt := fmt.Sprintf("You are an assistant in a WhatsApp chat.\nAnswer this message:\n\n%s: %s", jid, text)
-		if text == "" && imageData != "" {
-			prompt = "What is in this image?"
-		}
-
-		// Send initial thinking message
-		client.SendChatPresence(context.Background(), evt.Info.Chat, types.ChatPresenceComposing, types.ChatPresenceMediaText)
-		thinkingMsg := "Thinking..."
-		resp, err := client.SendMessage(context.Background(), evt.Info.Chat, &waE2E.Message{Conversation: &thinkingMsg})
-		if err != nil {
-			log.Printf("Error sending thinking message: %v", err)
-		}
-
-		// Construct the MessageKey for editing
-		thinkingMsgKey := &waCommon.MessageKey{
-			FromMe:    boolPtr(true),
-			ID:        &resp.ID,
-			RemoteJID: strPtr(evt.Info.Chat.String()),
-		}
-
-		// Start typing indicator status updates
-		indicatorCtx, cancelIndicator := context.WithCancel(context.Background())
-		go typingIndicator(indicatorCtx, evt.Info.Chat, thinkingMsgKey)
-
-		reply, newSessionID, modelName := callGemini(prompt, sessionID, imageData, mimeType)
-		
-		// Stop the indicator before sending the reply
-		cancelIndicator()
-		
-		if newSessionID != "" {
-			userSessions[jid] = newSessionID
-		}
-
-		if sessionID == "" && newSessionID != "" {
-			modelSuffix := ""
-			if modelName != "" {
-				modelSuffix = fmt.Sprintf(" (%s)", modelName)
+			prompt := fmt.Sprintf("You are an assistant in a WhatsApp chat.\nAnswer this message:\n\n%s: %s", jid, text)
+			if text == "" && imageData != "" {
+				prompt = "What is in this image?"
 			}
-			reply = fmt.Sprintf("🆔 Session: %s%s\n\n%s", newSessionID, modelSuffix, reply)
-		}
 
-		client.SendMessage(context.Background(), evt.Info.Chat, &waE2E.Message{
-			Conversation: &reply,
-		})
+			// Send initial thinking message
+			client.SendChatPresence(context.Background(), evt.Info.Chat, types.ChatPresenceComposing, types.ChatPresenceMediaText)
+			thinkingMsg := "Thinking..."
+			resp, err := client.SendMessage(context.Background(), evt.Info.Chat, &waE2E.Message{Conversation: &thinkingMsg})
+			if err != nil {
+				log.Printf("Error sending thinking message: %v", err)
+			}
+
+			// Construct the MessageKey for editing
+			thinkingMsgKey := &waCommon.MessageKey{
+				FromMe:    boolPtr(true),
+				ID:        &resp.ID,
+				RemoteJID: strPtr(evt.Info.Chat.String()),
+			}
+
+			// Start typing indicator status updates
+			indicatorCtx, cancelIndicator := context.WithCancel(context.Background())
+			go typingIndicator(indicatorCtx, evt.Info.Chat, thinkingMsgKey)
+
+			reply, newSessionID, modelName := callGemini(prompt, sessionID, imageData, mimeType)
+			
+			// Stop the indicator before sending the reply
+			cancelIndicator()
+			
+			if newSessionID != "" {
+				userSessions[jid] = newSessionID
+			}
+
+			if sessionID == "" && newSessionID != "" {
+				modelSuffix := ""
+				if modelName != "" {
+					modelSuffix = fmt.Sprintf(" (%s)", modelName)
+				}
+				reply = fmt.Sprintf("🆔 Session: %s%s\n\n%s", newSessionID, modelSuffix, reply)
+			}
+
+			client.SendMessage(context.Background(), evt.Info.Chat, &waE2E.Message{
+				Conversation: &reply,
+			})
+		}(evt)
 	}
 }
 

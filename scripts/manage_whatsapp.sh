@@ -7,6 +7,7 @@ WA_BOT_DIR="$REPO_DIR/whatsapp_bot"
 WA_BOT_BIN="$WA_BOT_DIR/whatsapp_bot_bin"
 WA_BOT_PID_FILE="$TMP_DIR/whatsapp-bot.pid"
 WA_BOT_LOG="$TMP_DIR/whatsapp-bot.log"
+LISTEN_LOG="$TMP_DIR/gemini-listen.log"
 
 mkdir -p "$TMP_DIR"
 
@@ -107,7 +108,7 @@ case "$1" in
         status_wa
         ;;
     logs)
-        tail -f "$WA_BOT_LOG"
+        tail -f "$LISTEN_LOG" "$WA_BOT_LOG" 2>/dev/null
         ;;
     *)
         echo "Usage: $0 {start|stop|restart|status|logs}"
