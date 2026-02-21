@@ -1,6 +1,6 @@
-# GeminiCLI Telegram Bot
+# GeminiCLI Multi-Platform Bot (Telegram & WhatsApp)
 
-This project provides a Telegram bot integration for the Gemini CLI, enabling powerful AI-driven automation and interactive responses directly within your Telegram chats. The core idea is to bridge the gap between conversational interfaces and robust command-line automation, allowing Gemini to participate in conversations, respond to messages, and automate tasks in a helpful and informative way while allowing you to move away from your machine but still continue with your vibe coding.
+This project provides Telegram and WhatsApp bot integrations for the Gemini CLI, enabling powerful AI-driven automation and interactive responses directly within your favorite messaging apps. The core idea is to bridge the gap between conversational interfaces and robust command-line automation, allowing Gemini to participate in conversations, respond to messages, and automate tasks in a helpful and informative way—allowing you to move away from your machine while continuing your "vibe coding" sessions on the go.
 
 This project was inspired by the original Slack bot concept from [John Capobianco](https://github.com/automateyournetwork/GeminiCLI_Slash_Listen).
 
@@ -22,78 +22,89 @@ After cloning, copy both the `commands` and `scripts` folders into your `.gemini
 
 ## 🚀 New: Session History Support
 
-The Gemini CLI Server now automatically maintains conversation history per Telegram user. This means the bot will "remember" previous parts of your conversation, allowing for more natural and contextual "vibe coding" on the go.
+The Gemini CLI Server now automatically maintains conversation history per user across both platforms. This means the bot will "remember" previous parts of your conversation, allowing for more natural and contextual "vibe coding" on the go.
 
 - **Automatic Persistence:** Each user has their own dedicated session managed by the Gemini CLI.
 - **Native Resumption:** The bot uses the Gemini CLI's `--resume` flag internally to maintain context.
+- **Multi-Platform Support:** Both Telegram and WhatsApp bots support session list, attachment, and creation.
 - **Local Management:** You can still use the standard Gemini CLI commands on your machine to list or resume these sessions:
     - `gemini --list-sessions`
     - `gemini --resume <session_id>`
 
 ## Core Components and Interaction
 
-This integration relies on two main components:
+This integration relies on three main components:
 
-1.  **`listen.js` (Gemini CLI Webhook Listener):** Located in the `scripts/` directory, this Node.js script acts as an HTTP server that listens for incoming messages and events. It serves as the bridge between the Telegram bot and your Gemini CLI. When it receives a message, it processes it and invokes the Gemini CLI with the provided prompt.
-    *   **YOLO Mode:** By default, `listen.js` invokes the Gemini CLI with the `--yolo` flag. This means Gemini will automatically approve and execute actions without requiring explicit confirmation, enabling a more seamless and automated interaction within the Telegram chat.
-
-2.  **`main.go` (Telegram Bot):** Located in the `telegram_bot/` directory, this Go application is your actual Telegram bot. It interacts directly with the Telegram Bot API, receives messages from users, and forwards them to the `listen.js` endpoint for processing by the Gemini CLI. It then sends Gemini's responses back to the Telegram chat.
+1.  **`listen.js` (Gemini CLI Webhook Listener):** Located in the `scripts/` directory, this Node.js script acts as an HTTP server on port 8765 that listens for incoming messages and events. It serves as the shared backend for both messaging bots.
+2.  **`main.go` (Telegram Bot):** Located in the `telegram_bot/` directory, this Go application interacts with the Telegram Bot API.
+3.  **`main.go` (WhatsApp Bot):** Located in the `whatsapp_bot/` directory, this Go application uses the `whatsmeow` library to interact with WhatsApp Multi-Device.
 
 **Interaction Flow:**
 
-Telegram User Message -> `main.go` (Telegram Bot) -> `listen.js` (Webhook Listener) -> Gemini CLI -> `listen.js` -> `main.go` -> Telegram User Reply
+User Message (TG/WA) -> Messaging Bot (Go) -> `listen.js` (Node.js) -> Gemini CLI -> `listen.js` -> Messaging Bot -> User Reply
 
 ## Telegram Bot Setup
 
 To get your Telegram bot up and running:
 
 1.  **Create a bot with [@BotFather](https://t.me/botfather) on Telegram.** Follow the instructions to create a new bot and obtain your unique bot token.
-2.  **Get your bot token.** This token is essential for your `main.go` application to authenticate with the Telegram API.
-3.  **Set up environment variables in `telegram_bot/.env`:**
+2.  **Set up environment variables in `telegram_bot/.env`:**
 
     ```bash
     TELEGRAM_BOT_TOKEN=your_bot_token_here
-    GEMINI_ENDPOINT=http://127.0.0.1:8765/event # or your ngrok URL
+    GEMINI_ENDPOINT=http://127.0.0.1:8765/event
     TARGET_CHAT_ID=                            # optional: specific chat ID for restricted access
     ```
-    *   `TELEGRAM_BOT_TOKEN`: The token you received from BotFather.
-    *   `GEMINI_ENDPOINT`: This should point to the `/event` endpoint of your `listen.js` server.
-        *   If `listen.js` is running locally, the default is `http://127.0.0.1:8765/event`.
-        *   If you need to expose your local `listen.js` server to the internet (e.g., for Telegram webhooks), you'll need a tunneling service like [ngrok](https://ngrok.com/). In this case, `GEMINI_ENDPOINT` would be your ngrok URL (e.g., `https://your-ngrok-subdomain.ngrok-free.app/event`).
-    *   `TARGET_CHAT_ID`: (Optional) If set, the bot will only respond to messages from this specific chat ID. This is useful for restricting bot access to a private group or chat.
 
-## Usage: Telegram Bot Commands
+## WhatsApp Bot Setup
 
-The Telegram bot dynamically registers commands based on `.toml` files found in the `commands/listen` directory. This allows for easy extension and management of available commands.
+To get your WhatsApp bot up and running:
 
-For example, to add a new command `/listen_mycommand`, you would create a file named `mycommand.toml` in the `commands/listen` directory with a `description` field:
+1.  **Ensure you have Go 1.25.0+ installed.**
+2.  **Set up environment variables in `whatsapp_bot/.env`:**
 
-```toml
-# commands/listen/mycommand.toml
-description = "This is a description for my new command."
-```
+    ```bash
+    GEMINI_ENDPOINT=http://127.0.0.1:8765/event
+    TARGET_JID=                                # optional: e.g. 1234567890@s.whatsapp.net to restrict access
+    ```
+3.  **Perform Initial Login (Scan QR Code):**
+    Run the bot manually once to scan the QR code and link your device:
+    ```bash
+    cd whatsapp_bot
+    go run main.go
+    ```
+    After scanning, the session will be saved to `whatsapp_bot.db`.
 
-Once the `main.go` application is restarted, `/listen_mycommand` will appear in your Telegram bot's command list with the specified description.
+## Service Management
 
-Here are the currently available `/listen` commands (defined in `commands/listen/*.toml`):
+You can manage all services (Listener, Telegram, and WhatsApp) using the provided shell scripts in the `scripts/` directory.
 
-*   `/listen: start` - Starts the webhook listener on port 8765, enabling the bot to receive messages.
-*   `/listen: status` - Checks the current operational status of the listener.
-*   `/listen: stop` - Halts the running listener.
-*   `/listen: logs` - Displays the logs generated by the listener, useful for debugging and monitoring.
-*   `/listen: health` - Performs a health check on the listener to ensure it's functioning correctly.
-*   `/listen: help` - Provides a summary of available `/listen` commands and their usage.
-*   `/listen: clear` - Clears the accumulated logs of the listener.
-*   `/listen: live` - Starts the listener in live mode, streaming real-time logs directly to your Gemini CLI terminal (local).
-
-### Running the Telegram Bot
-
-To start your Telegram bot, navigate to the `telegram_bot` directory and run the `main.go` application:
-
+### Managing Everything (Telegram + Listener)
 ```bash
-cd telegram_bot
-go run main.go
+./scripts/manage_telegram.sh start
+./scripts/manage_telegram.sh stop
+./scripts/manage_telegram.sh status
+./scripts/manage_telegram.sh logs
 ```
+
+### Managing WhatsApp
+```bash
+./scripts/manage_whatsapp.sh start
+./scripts/manage_whatsapp.sh stop
+./scripts/manage_whatsapp.sh status
+./scripts/manage_whatsapp.sh logs
+```
+
+## Usage: Messaging Bot Commands
+
+Both bots support common commands to manage AI sessions:
+
+*   `/sessions` - Lists recent sessions.
+*   `/attach <session_id>` - Resumes a specific session.
+*   `/new` - Starts a fresh session.
+*   `/status` - Shows the current session ID and bot status.
+
+Additionally, the Telegram bot dynamically registers commands based on `.toml` files found in the `commands/listen` directory.
 
 ## Testing your listener externally
 If you NGROK out your local 8765 port, you can test your listener by sending a message to the NGROK URL with the following command:
