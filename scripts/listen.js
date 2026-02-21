@@ -11,16 +11,14 @@ const port = Number(process.argv[2] || process.env.PORT || 8765);
 function runGemini(prompt, sessionId = null, imageData = null, mimeType = null) {
   return new Promise((resolve, reject) => {
     let tempFile = null;
-    // We use positional arguments to trigger agentic tool usage (like reading images)
-    // The CLI defaults to interactive mode with positionals, so we pipe "/bye" to exit.
     const args = ["--yolo", "-m", "gemini-3-flash-preview", "--output-format", "json"];
     
     if (sessionId) {
       args.push("--resume", sessionId);
     }
     
-    // Construct the positional prompt
-    let positionalPrompt = prompt;
+    // Construct the prompt
+    let finalPrompt = prompt;
 
     if (imageData) {
       const ext = mimeType === "image/png" ? "png" : "jpg";
@@ -29,20 +27,16 @@ function runGemini(prompt, sessionId = null, imageData = null, mimeType = null) 
       fs.writeFileSync(tempFile, Buffer.from(imageData, "base64"));
       
       // Add the relative path to the prompt string for the agent to find
-      positionalPrompt = `${prompt} uploads/${fileName}`;
+      finalPrompt = `${prompt} uploads/${fileName}`;
     }
 
-    // Add prompt as a positional argument
-    args.push(positionalPrompt);
+    // Use --prompt to ensure non-interactive mode
+    args.push("--prompt", finalPrompt);
 
     console.log(`[${new Date().toISOString()}] Executing Gemini (Session: ${sessionId || "new"})${tempFile ? ` with image uploads/${path.basename(tempFile)}` : ""}`);
     
-    const p = spawn("gemini", args, { stdio: ["pipe", "pipe", "pipe"] });
+    const p = spawn("gemini", args, { stdio: ["ignore", "pipe", "pipe"] });
     
-    // Send /bye to exit interactive mode immediately after processing
-    p.stdin.write("/bye\n");
-    p.stdin.end();
-
     let out = "", err = "";
     p.stdout.on("data", d => (out += d.toString()));
     p.stderr.on("data", d => (err += d.toString()));
