@@ -165,7 +165,7 @@ case "$1" in
         status_all
         ;;
     logs)
-        tail -f "$LISTEN_LOG" "$BOT_LOG" "$WA_BOT_LOG" 2>/dev/null
+        tail -f "$LISTEN_LOG" "$BOT_LOG" 2>/dev/null
         ;;
     *)
         echo "Usage: $0 {start|stop|restart|status|logs}"
