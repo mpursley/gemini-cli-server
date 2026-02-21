@@ -17,8 +17,10 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/mdp/qrterminal/v3"
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/store/sqlstore"
+	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
 	"github.com/joho/godotenv"
@@ -49,6 +51,10 @@ func strPtr(s string) *string {
 	return &s
 }
 
+func boolPtr(b bool) *bool {
+	return &b
+}
+
 func main() {
 	if err := godotenv.Load(); err != nil {
 		log.Printf("Warning: .env file not found")
@@ -60,7 +66,7 @@ func main() {
 	}
 	targetJID = os.Getenv("TARGET_JID")
 
-	dbLog := waLog.Stdout("Database", "DEBUG", true)
+	dbLog := waLog.Stdout("Database", "INFO", true)
 	container, err := sqlstore.New(context.Background(), "sqlite3", "file:whatsapp_bot.db?_foreign_keys=on", dbLog)
 	if err != nil {
 		log.Fatal(err)
@@ -71,7 +77,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	clientLog := waLog.Stdout("Client", "DEBUG", true)
+	clientLog := waLog.Stdout("Client", "INFO", true)
 	client = whatsmeow.NewClient(deviceStore, clientLog)
 	client.AddEventHandler(handler)
 
@@ -120,6 +126,48 @@ func main() {
 	client.Disconnect()
 }
 
+func typingIndicator(ctx context.Context, chat types.JID, messageKey *waCommon.MessageKey) {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	dots := "..."
+	seconds := 0
+	for {
+		select {
+		case <-ctx.Done():
+			// Set back to paused/not composing when finished
+			client.SendChatPresence(context.Background(), chat, types.ChatPresencePaused, types.ChatPresenceMediaText)
+			return
+		case <-ticker.C:
+			seconds++
+			dots += "."
+			if len(dots) > 10 {
+				dots = "..."
+			}
+
+			// Refresh the "composing" status every few seconds
+			if seconds%5 == 0 {
+				client.SendChatPresence(context.Background(), chat, types.ChatPresenceComposing, types.ChatPresenceMediaText)
+			}
+
+			// Edit the "Thinking..." message
+			newText := fmt.Sprintf("Thinking (%d seconds) %s", seconds, dots)
+			
+			// To edit a message in WhatsApp, we send a ProtocolMessage referencing the original message key
+			editMsg := &waE2E.Message{
+				ProtocolMessage: &waE2E.ProtocolMessage{
+					Type: waE2E.ProtocolMessage_MESSAGE_EDIT.Enum(),
+					Key:  messageKey,
+					EditedMessage: &waE2E.Message{
+						Conversation: &newText,
+					},
+				},
+			}
+			client.SendMessage(context.Background(), chat, editMsg)
+		}
+	}
+}
+
 type Session struct {
 	ID          string `json:"id"`
 	Description string `json:"description"`
@@ -135,17 +183,31 @@ type SessionsResponse struct {
 func handler(rawEvt interface{}) {
 	switch evt := rawEvt.(type) {
 	case *events.Connected:
-		log.Printf("WhatsApp bot connected and ready.")
+		log.Printf("WhatsApp bot connected and ready. My JID: %s", client.Store.ID.String())
 	case *events.Message:
-		if evt.Info.IsFromMe {
+		// Debug logging to understand why messages might be ignored
+		sender := evt.Info.Sender.String()
+
+		// If it's from us, usually we ignore. 
+		// BUT if it's from the user's LID account (even if marked FromMe), we want to process it.
+		isUserLID := strings.Contains(sender, "229712718741576")
+		
+		if evt.Info.IsFromMe && !isUserLID {
 			return
 		}
 
-		if targetJID != "" && !strings.Contains(evt.Info.Sender.String(), targetJID) {
+		// Also ignore edits to avoid responding to our own "Thinking..." updates
+		// (Unless it's from the user's LID, but usually users don't "edit" into a loop)
+		if evt.Message.GetProtocolMessage().GetType() == waE2E.ProtocolMessage_MESSAGE_EDIT && !isUserLID {
 			return
 		}
 
-		jid := evt.Info.Sender.String()
+		if targetJID != "" && !strings.Contains(sender, targetJID) {
+			log.Printf("Ignoring message from %s (targetJID filter)", sender)
+			return
+		}
+
+		jid := sender
 		sessionID := userSessions[jid]
 
 		// 1. Handle Images
@@ -214,7 +276,30 @@ func handler(rawEvt interface{}) {
 			prompt = "What is in this image?"
 		}
 
+		// Send initial thinking message
+		client.SendChatPresence(context.Background(), evt.Info.Chat, types.ChatPresenceComposing, types.ChatPresenceMediaText)
+		thinkingMsg := "Thinking..."
+		resp, err := client.SendMessage(context.Background(), evt.Info.Chat, &waE2E.Message{Conversation: &thinkingMsg})
+		if err != nil {
+			log.Printf("Error sending thinking message: %v", err)
+		}
+
+		// Construct the MessageKey for editing
+		thinkingMsgKey := &waCommon.MessageKey{
+			FromMe:    boolPtr(true),
+			ID:        &resp.ID,
+			RemoteJID: strPtr(evt.Info.Chat.String()),
+		}
+
+		// Start typing indicator status updates
+		indicatorCtx, cancelIndicator := context.WithCancel(context.Background())
+		go typingIndicator(indicatorCtx, evt.Info.Chat, thinkingMsgKey)
+
 		reply, newSessionID, modelName := callGemini(prompt, sessionID, imageData, mimeType)
+		
+		// Stop the indicator before sending the reply
+		cancelIndicator()
+		
 		if newSessionID != "" {
 			userSessions[jid] = newSessionID
 		}
@@ -250,7 +335,7 @@ func handleSessionsCommand(evt *events.Message) {
 	var sb strings.Builder
 	sb.WriteString("📋 *Recent Sessions:*\n\n")
 	for i, s := range sessions {
-		if i >= 10 {
+		if i >= 15 {
 			break
 		}
 		desc := s.Description

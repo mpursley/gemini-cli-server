@@ -321,7 +321,7 @@ func handleSessionsCommand(message *tgbotapi.Message) {
 	var sb strings.Builder
 	sb.WriteString("📋 *Recent Sessions:*\n\n")
 	for i, s := range sessions {
-		if i >= 10 { // Limit to top 10
+		if i >= 15 { // Limit to top 15
 			break
 		}
 		description := s.Description
