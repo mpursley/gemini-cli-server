@@ -273,11 +273,13 @@ func handleMessage(message *tgbotapi.Message) {
 	// Start typing indicator with the sent message ID
 	ctx, cancel := context.WithCancel(context.Background())
 	go typingIndicator(ctx, message.Chat.ID, sentMsg.MessageID)
-	defer cancel()
 
 	oldSessionID := userState.SessionID
 	reply, newSessionID, modelName := callGemini(prompt, userState.SessionID, "", "")
 	
+	// Stop the typing indicator before editing the message
+	cancel()
+
 	// Update user state with the session ID returned by Gemini
 	if newSessionID != "" {
 		userState.SessionID = newSessionID
@@ -289,7 +291,7 @@ func handleMessage(message *tgbotapi.Message) {
 		if modelName != "" {
 			modelSuffix = fmt.Sprintf(" (%s)", modelName)
 		}
-		reply = fmt.Sprintf("%s\n\n🆔 Session: %s%s", reply, newSessionID, modelSuffix)
+		reply = fmt.Sprintf("🆔 Session: %s%s\n\n%s", newSessionID, modelSuffix, reply)
 	}
 
 	// Edit the thinking message with the actual reply
@@ -319,7 +321,7 @@ func handleSessionsCommand(message *tgbotapi.Message) {
 	var sb strings.Builder
 	sb.WriteString("📋 *Recent Sessions:*\n\n")
 	for i, s := range sessions {
-		if i >= 10 { // Limit to top 10
+		if i >= 15 { // Limit to top 15
 			break
 		}
 		description := s.Description
@@ -474,10 +476,13 @@ func handleVoiceMessage(message *tgbotapi.Message) {
 	// Start persistent typing indicator with the message ID
 	indicatorCtx, cancelIndicator := context.WithCancel(context.Background())
 	go typingIndicator(indicatorCtx, message.Chat.ID, sentMsg.MessageID)
-	defer cancelIndicator()
 
 	oldSessionID := userState.SessionID
 	reply, newSessionID, modelName := callGemini(prompt, userState.SessionID, "", "")
+	
+	// Stop the typing indicator before editing the message
+	cancelIndicator()
+
 	if newSessionID != "" {
 		userState.SessionID = newSessionID
 	}
@@ -487,7 +492,7 @@ func handleVoiceMessage(message *tgbotapi.Message) {
 		if modelName != "" {
 			modelSuffix = fmt.Sprintf(" (%s)", modelName)
 		}
-		reply = fmt.Sprintf("%s\n\n🆔 Session: %s%s", reply, newSessionID, modelSuffix)
+		reply = fmt.Sprintf("🆔 Session: %s%s\n\n%s", newSessionID, modelSuffix, reply)
 	}
 
 	editMsg := tgbotapi.NewEditMessageText(message.Chat.ID, sentMsg.MessageID, reply)
@@ -530,10 +535,13 @@ func handlePhotoMessage(message *tgbotapi.Message) {
 	// Start persistent typing indicator
 	indicatorCtx, cancelIndicator := context.WithCancel(context.Background())
 	go typingIndicator(indicatorCtx, message.Chat.ID, sentMsg.MessageID)
-	defer cancelIndicator()
 
 	oldSessionID := userState.SessionID
 	reply, newSessionID, modelName := callGemini(prompt, userState.SessionID, imageData, "image/jpeg")
+	
+	// Stop the typing indicator before editing the message
+	cancelIndicator()
+
 	if newSessionID != "" {
 		userState.SessionID = newSessionID
 	}
@@ -543,7 +551,7 @@ func handlePhotoMessage(message *tgbotapi.Message) {
 		if modelName != "" {
 			modelSuffix = fmt.Sprintf(" (%s)", modelName)
 		}
-		reply = fmt.Sprintf("%s\n\n🆔 Session: %s%s", reply, newSessionID, modelSuffix)
+		reply = fmt.Sprintf("🆔 Session: %s%s\n\n%s", newSessionID, modelSuffix, reply)
 	}
 
 	editMsg := tgbotapi.NewEditMessageText(message.Chat.ID, sentMsg.MessageID, reply)
