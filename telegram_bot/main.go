@@ -124,8 +124,8 @@ func main() {
 	}
 }
 
-func typingIndicator(ctx context.Context, chatID int64, messageID int) {
-	ticker := time.NewTicker(1 * time.Second)
+func typingIndicator(ctx context.Context, chatID int64, currentMsgID *int) {
+	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
 	dots := "..."
@@ -135,20 +135,34 @@ func typingIndicator(ctx context.Context, chatID int64, messageID int) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			seconds++
-			dots += "."
-			if len(dots) > 15 {
+			seconds += 5
+			dots += ".."
+			if len(dots) > 10 {
 				dots = "..."
 			}
-			// Update the message text with seconds and dots
-			text := fmt.Sprintf("Thinking (%d seconds) %s", seconds, dots)
-			editMsg := tgbotapi.NewEditMessageText(chatID, messageID, text)
-			bot.Send(editMsg)
-			
-			// Refresh the telegram "typing" status every few seconds (it lasts ~5s)
-			if seconds%5 == 0 {
-				bot.Send(tgbotapi.NewChatAction(chatID, tgbotapi.ChatTyping))
+
+			// Every 60 seconds, send a NEW thinking message to "bump" the chat
+			// as requested by the user to avoid any perceived timeouts.
+			if seconds%60 == 0 {
+				text := fmt.Sprintf("Still thinking (%d seconds) %s", seconds, dots)
+				newMsg := tgbotapi.NewMessage(chatID, text)
+				sentMsg, err := bot.Send(newMsg)
+				if err == nil {
+					// Delete the old thinking message to keep the chat clean
+					deleteMsg := tgbotapi.NewDeleteMessage(chatID, *currentMsgID)
+					bot.Request(deleteMsg)
+					// Update the currentMsgID so the final reply goes to this new message
+					*currentMsgID = sentMsg.MessageID
+				}
+			} else {
+				// Otherwise just edit the current message
+				text := fmt.Sprintf("Thinking (%d seconds) %s", seconds, dots)
+				editMsg := tgbotapi.NewEditMessageText(chatID, *currentMsgID, text)
+				bot.Send(editMsg)
 			}
+
+			// Refresh the telegram "typing" status
+			bot.Send(tgbotapi.NewChatAction(chatID, tgbotapi.ChatTyping))
 		}
 	}
 }
@@ -272,7 +286,8 @@ func handleMessage(message *tgbotapi.Message) {
 
 	// Start typing indicator with the sent message ID
 	ctx, cancel := context.WithCancel(context.Background())
-	go typingIndicator(ctx, message.Chat.ID, sentMsg.MessageID)
+	currentMsgID := sentMsg.MessageID
+	go typingIndicator(ctx, message.Chat.ID, &currentMsgID)
 
 	oldSessionID := userState.SessionID
 	reply, newSessionID, modelName := callGemini(prompt, userState.SessionID, "", "")
@@ -295,7 +310,7 @@ func handleMessage(message *tgbotapi.Message) {
 	}
 
 	// Edit the thinking message with the actual reply
-	editMsg := tgbotapi.NewEditMessageText(message.Chat.ID, sentMsg.MessageID, reply)
+	editMsg := tgbotapi.NewEditMessageText(message.Chat.ID, currentMsgID, reply)
 	if _, err := bot.Send(editMsg); err != nil {
 		log.Printf("Error editing message: %v", err)
 		// Fallback: send as new message if edit fails
@@ -373,7 +388,7 @@ func callGemini(prompt string, sessionId string, imageData string, mimeType stri
 		return "❌ Error processing request", "", ""
 	}
 
-	client := &http.Client{Timeout: 300 * time.Second}
+	client := &http.Client{Timeout: 30 * time.Minute}
 	log.Printf("Calling Gemini at URL: %s (Session: %s)", geminiURL, sessionId)
 	resp, err := client.Post(geminiURL, "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
@@ -475,7 +490,8 @@ func handleVoiceMessage(message *tgbotapi.Message) {
 
 	// Start persistent typing indicator with the message ID
 	indicatorCtx, cancelIndicator := context.WithCancel(context.Background())
-	go typingIndicator(indicatorCtx, message.Chat.ID, sentMsg.MessageID)
+	currentMsgID := sentMsg.MessageID
+	go typingIndicator(indicatorCtx, message.Chat.ID, &currentMsgID)
 
 	oldSessionID := userState.SessionID
 	reply, newSessionID, modelName := callGemini(prompt, userState.SessionID, "", "")
@@ -495,7 +511,7 @@ func handleVoiceMessage(message *tgbotapi.Message) {
 		reply = fmt.Sprintf("🆔 Session: %s%s\n\n%s", newSessionID, modelSuffix, reply)
 	}
 
-	editMsg := tgbotapi.NewEditMessageText(message.Chat.ID, sentMsg.MessageID, reply)
+	editMsg := tgbotapi.NewEditMessageText(message.Chat.ID, currentMsgID, reply)
 	if _, err := bot.Send(editMsg); err != nil {
 		log.Printf("Error editing message: %v", err)
 		msg := tgbotapi.NewMessage(message.Chat.ID, reply)
@@ -534,7 +550,8 @@ func handlePhotoMessage(message *tgbotapi.Message) {
 
 	// Start persistent typing indicator
 	indicatorCtx, cancelIndicator := context.WithCancel(context.Background())
-	go typingIndicator(indicatorCtx, message.Chat.ID, sentMsg.MessageID)
+	currentMsgID := sentMsg.MessageID
+	go typingIndicator(indicatorCtx, message.Chat.ID, &currentMsgID)
 
 	oldSessionID := userState.SessionID
 	reply, newSessionID, modelName := callGemini(prompt, userState.SessionID, imageData, "image/jpeg")
@@ -554,7 +571,7 @@ func handlePhotoMessage(message *tgbotapi.Message) {
 		reply = fmt.Sprintf("🆔 Session: %s%s\n\n%s", newSessionID, modelSuffix, reply)
 	}
 
-	editMsg := tgbotapi.NewEditMessageText(message.Chat.ID, sentMsg.MessageID, reply)
+	editMsg := tgbotapi.NewEditMessageText(message.Chat.ID, currentMsgID, reply)
 	if _, err := bot.Send(editMsg); err != nil {
 		log.Printf("Error editing message: %v", err)
 		msg := tgbotapi.NewMessage(message.Chat.ID, reply)

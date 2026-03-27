@@ -127,7 +127,7 @@ func main() {
 }
 
 func typingIndicator(ctx context.Context, chat types.JID, messageKey *waCommon.MessageKey) {
-	ticker := time.NewTicker(1 * time.Second)
+	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
 	dots := "..."
@@ -139,16 +139,14 @@ func typingIndicator(ctx context.Context, chat types.JID, messageKey *waCommon.M
 			client.SendChatPresence(context.Background(), chat, types.ChatPresencePaused, types.ChatPresenceMediaText)
 			return
 		case <-ticker.C:
-			seconds++
-			dots += "."
+			seconds += 5
+			dots += ".."
 			if len(dots) > 10 {
 				dots = "..."
 			}
 
-			// Refresh the "composing" status every few seconds
-			if seconds%5 == 0 {
-				client.SendChatPresence(context.Background(), chat, types.ChatPresenceComposing, types.ChatPresenceMediaText)
-			}
+			// Refresh the "composing" status
+			client.SendChatPresence(context.Background(), chat, types.ChatPresenceComposing, types.ChatPresenceMediaText)
 
 			// Edit the "Thinking..." message
 			newText := fmt.Sprintf("Thinking (%d seconds) %s", seconds, dots)
@@ -386,7 +384,7 @@ func callGemini(prompt string, sessionId string, imageData string, mimeType stri
 		return "❌ Error processing request", "", ""
 	}
 
-	httpClient := &http.Client{Timeout: 300 * time.Second}
+	httpClient := &http.Client{Timeout: 30 * time.Minute}
 	resp, err := httpClient.Post(geminiURL, "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
 		log.Printf("Error calling Gemini: %v", err)

@@ -173,6 +173,11 @@ const server = http.createServer((req, res) => {
   res.end("Not found");
 });
 
+// Increase server timeouts for long-running Gemini tasks
+server.timeout = 1800000; // 30 minutes
+server.headersTimeout = 1800000; // 30 minutes
+server.requestTimeout = 1800000; // 30 minutes
+
 function cleanup() {
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 1500).unref();
