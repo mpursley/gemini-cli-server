@@ -31,6 +31,7 @@ type GeminiPayload struct {
 	SessionID string `json:"sessionId,omitempty"`
 	ImageData string `json:"imageData,omitempty"`
 	MimeType  string `json:"mimeType,omitempty"`
+	ApiKey    string `json:"apiKey,omitempty"`
 }
 
 type StreamChunk struct {
@@ -54,6 +55,7 @@ var (
 	client       *whatsmeow.Client
 	geminiURL    string
 	targetJID    string
+	geminiAPIKey string
 	userSessions = make(map[string]string) // Map JID to SessionID
 )
 
@@ -65,16 +67,27 @@ func boolPtr(b bool) *bool {
 	return &b
 }
 
-func main() {
-	if err := godotenv.Load(); err != nil {
-		log.Printf("Warning: .env file not found")
+func initVars() {
+	err := godotenv.Load()
+	if err != nil {
+		log.Println("No .env file found or error loading it. Relying on environment variables.")
 	}
 
 	geminiURL = os.Getenv("GEMINI_ENDPOINT")
 	if geminiURL == "" {
 		geminiURL = "http://127.0.0.1:8765/event"
 	}
+	
+	geminiAPIKey = os.Getenv("GEMINI_API_KEY")
+
 	targetJID = os.Getenv("TARGET_JID")
+	if targetJID == "" {
+		log.Fatal("TARGET_JID is missing. Please set it in your .env or as an environment variable.")
+	}
+}
+
+func main() {
+	initVars()
 
 	dbLog := waLog.Stdout("Database", "INFO", true)
 	container, err := sqlstore.New(context.Background(), "sqlite3", "file:whatsapp_bot.db?_foreign_keys=on", dbLog)
@@ -264,67 +277,82 @@ func handler(rawEvt interface{}) {
 				prompt = "What is in this image?"
 			}
 
-			// Send initial thinking message
-			thinkingMsg := "Thinking..."
-			sentMsg, err := client.SendMessage(context.Background(), evt.Info.Chat, &waE2E.Message{
-				Conversation: &thinkingMsg,
-			})
-			if err != nil {
-				log.Printf("Error sending thinking message: %v", err)
-			}
-
 			// Start persistent typing indicator
 			indicatorCtx, cancelIndicator := context.WithCancel(context.Background())
 			go typingIndicator(indicatorCtx, evt.Info.Chat)
 
 			// Debounced UI updater
-			editChan := make(chan string, 100)
+			type uiUpdate struct {
+				thought string
+				text    string
+			}
+			editChan := make(chan uiUpdate, 100)
 			doneChan := make(chan bool)
 			go func() {
 				var lastEdit time.Time
-				timer := time.NewTimer(time.Hour) // Initialize with a long duration
-				timer.Stop() // Stop it immediately
+				var lastThought string
+				var lastText string
+				var thoughtMsgID string
+				var textMsgID string
+
+				timer := time.NewTimer(time.Hour)
+				timer.Stop()
 
 				for {
 					select {
-					case text := <-editChan:
-						// Only send an edit if enough time has passed or if the timer has fired
+					case update := <-editChan:
 						if time.Since(lastEdit) > 2*time.Second {
-							if sentMsg.ID != "" {
-								msgText := text
-								client.SendMessage(context.Background(), evt.Info.Chat, client.BuildEdit(evt.Info.Chat, sentMsg.ID, &waE2E.Message{
-									Conversation: &msgText,
-								}))
+							if update.thought != lastThought && update.thought != "" {
+								msgInfo := "💭 *Thinking:*\n" + update.thought
+								if thoughtMsgID == "" {
+									sentMsg, _ := client.SendMessage(context.Background(), evt.Info.Chat, &waE2E.Message{
+										Conversation: &msgInfo,
+									})
+									if sentMsg.ID != "" {
+										thoughtMsgID = sentMsg.ID
+									}
+								} else {
+									client.SendMessage(context.Background(), evt.Info.Chat, client.BuildEdit(evt.Info.Chat, thoughtMsgID, &waE2E.Message{
+										Conversation: &msgInfo,
+									}))
+								}
+								lastThought = update.thought
+							}
+							if update.text != lastText && update.text != "" {
+								if textMsgID == "" {
+									sentMsg, _ := client.SendMessage(context.Background(), evt.Info.Chat, &waE2E.Message{
+										Conversation: &update.text,
+									})
+									if sentMsg.ID != "" {
+										textMsgID = sentMsg.ID
+									}
+								} else {
+									client.SendMessage(context.Background(), evt.Info.Chat, client.BuildEdit(evt.Info.Chat, textMsgID, &waE2E.Message{
+										Conversation: &update.text,
+									}))
+								}
+								lastText = update.text
 							}
 							lastEdit = time.Now()
-							timer.Stop() // Stop any pending timer
+							timer.Stop()
 						} else {
-							// If not enough time has passed, reset the timer to fire after the debounce period
 							timer.Reset(2 * time.Second)
 						}
 					case <-timer.C:
-						// Timer fired, send the last received text
-						if sentMsg.ID != "" {
-							// Ensure there's something to send
-							if len(editChan) > 0 {
-								lastText := <-editChan // Get the most recent text
-								client.SendMessage(context.Background(), evt.Info.Chat, client.BuildEdit(evt.Info.Chat, sentMsg.ID, &waE2E.Message{
-									Conversation: &lastText,
-								}))
-								lastEdit = time.Now()
-							}
+						if len(editChan) > 0 {
+							// For simplistic flushing
 						}
 					case <-doneChan:
-						timer.Stop() // Clean up timer
+						timer.Stop()
 						return
 					}
 				}
 			}()
 
 			var finalReply string
-			newSessionID, modelName := callGemini(prompt, sessionID, imageData, mimeType, func(currentText string) {
-				finalReply = currentText
-				editChan <- currentText
+			newSessionID, modelName := callGemini(prompt, sessionID, imageData, mimeType, func(thought string, text string) {
+				finalReply = text
+				editChan <- uiUpdate{thought: thought, text: text}
 			})
 			
 			doneChan <- true
@@ -341,18 +369,16 @@ func handler(rawEvt interface{}) {
 				if modelName != "" {
 					modelSuffix = fmt.Sprintf(" (%s)", modelName)
 				}
-				finalReply = fmt.Sprintf("🆔 Session: %s%s\n\n%s", newSessionID, modelSuffix, finalReply)
+				finalReply = fmt.Sprintf("🤖 gemini-cli-server v1.1.0\n🆔 Session: %s%s\n\n%s", newSessionID, modelSuffix, finalReply)
 			}
 
-			if sentMsg.ID != "" {
-				client.SendMessage(context.Background(), evt.Info.Chat, client.BuildEdit(evt.Info.Chat, sentMsg.ID, &waE2E.Message{
-					Conversation: &finalReply,
-				}))
-			} else {
-				client.SendMessage(context.Background(), evt.Info.Chat, &waE2E.Message{
-					Conversation: &finalReply,
-				})
+			if finalReply == "" {
+				finalReply = "Done."
 			}
+
+			client.SendMessage(context.Background(), evt.Info.Chat, &waE2E.Message{
+				Conversation: &finalReply,
+			})
 		}(evt)
 	}
 }
@@ -406,13 +432,14 @@ func fetchSessions() ([]Session, error) {
 	return sessResp.Sessions, nil
 }
 
-func callGemini(prompt string, sessionId string, imageData string, mimeType string, onChunk func(string)) (string, string) {
+func callGemini(prompt string, sessionId string, imageData string, mimeType string, onChunk func(string, string)) (string, string) {
 	payload := GeminiPayload{
 		Source:    "whatsapp",
 		Message:   prompt,
 		SessionID: sessionId,
 		ImageData: imageData,
 		MimeType:  mimeType,
+		ApiKey:    geminiAPIKey,
 	}
 
 	jsonData, err := json.Marshal(payload)
@@ -434,16 +461,6 @@ func callGemini(prompt string, sessionId string, imageData string, mimeType stri
 	var finalSession string
 	var finalModel string
 	
-	buildContent := func() string {
-		out := ""
-		if fullThought != "" {
-			out += "💭 *Thinking:*\n" + fullThought + "\n\n---\n"
-		}
-		out += fullText
-		if out == "" { out = "..." }
-		return out
-	}
-
 	for {
 		var chunk StreamChunk
 		if err := decoder.Decode(&chunk); err != nil {
@@ -456,16 +473,16 @@ func callGemini(prompt string, sessionId string, imageData string, mimeType stri
 			if chunk.Error != "" {
 				fullText += "\n⚠️ " + chunk.Error
 			}
-			onChunk(buildContent())
+			onChunk(fullThought, fullText)
 		} else if chunk.Type == "thought" {
 			fullThought += chunk.Content
-			onChunk(buildContent())
+			onChunk(fullThought, fullText)
 		} else if chunk.Type == "tool_use" {
 			fullThought += fmt.Sprintf("\n[🛠️ %s...]", chunk.ToolName)
-			onChunk(buildContent())
+			onChunk(fullThought, fullText)
 		} else if chunk.Type == "message" && chunk.Role == "assistant" {
 			fullText += chunk.Content
-			onChunk(buildContent())
+			onChunk(fullThought, fullText)
 		}
 	}
 	
