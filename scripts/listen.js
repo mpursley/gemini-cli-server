@@ -8,7 +8,7 @@ const port = Number(process.argv[2] || process.env.PORT || 8765);
 
 
 
-function runGemini(prompt, sessionId = null, imageData = null, mimeType = null, res) {
+function runGemini(prompt, sessionId = null, imageData = null, mimeType = null, apiKey = null, res) {
   let tempFile = null;
   const args = ["--yolo", "-m", "gemini-3.1-pro-preview", "--output-format", "stream-json"];
   
@@ -28,7 +28,22 @@ function runGemini(prompt, sessionId = null, imageData = null, mimeType = null, 
   args.push("--prompt", finalPrompt);
   console.log(`[${new Date().toISOString()}] Executing Gemini Streaming (Session: ${sessionId || "new"})${tempFile ? ` with image` : ""}`);
   
-  const p = spawn("gemini", args, { stdio: ["ignore", "pipe", "pipe"] });
+  const envVars = Object.assign({}, process.env);
+  if (apiKey) {
+    envVars.GEMINI_API_KEY = apiKey;
+  }
+
+  let cliCommand = "gemini";
+  let cliArgs = args;
+  
+  // Prefer the explicitly patched local repository if it exists
+  const localDevBundle = process.env.HOME + "/dev/gemini-cli/bundle/gemini.js";
+  if (fs.existsSync(localDevBundle)) {
+    cliCommand = "node";
+    cliArgs = [localDevBundle, ...args];
+  }
+
+  const p = spawn(cliCommand, cliArgs, { stdio: ["ignore", "pipe", "pipe"], env: envVars });
   const readline = require("readline");
   const rl = readline.createInterface({ input: p.stdout });
   
@@ -56,7 +71,15 @@ function runGemini(prompt, sessionId = null, imageData = null, mimeType = null, 
 function listSessions() {
   return new Promise((resolve, reject) => {
     console.log(`[${new Date().toISOString()}] Listing sessions...`);
-    const p = spawn("gemini", ["--list-sessions"], { stdio: ["ignore", "pipe", "pipe"] });
+    let cliCommand = "gemini";
+    let cliArgs = ["--list-sessions"];
+    const localDevBundle = process.env.HOME + "/dev/gemini-cli/bundle/gemini.js";
+    if (fs.existsSync(localDevBundle)) {
+      cliCommand = "node";
+      cliArgs = [localDevBundle, "--list-sessions"];
+    }
+
+    const p = spawn(cliCommand, cliArgs, { stdio: ["ignore", "pipe", "pipe"] });
     let out = "", err = "";
     p.stdout.on("data", d => (out += d.toString()));
     p.stderr.on("data", d => (err += d.toString()));
@@ -123,13 +146,14 @@ const server = http.createServer((req, res) => {
       const sessionId = parsed.sessionId || null;
       const imageData = parsed.imageData || null;
       const mimeType = parsed.mimeType || null;
+      const apiKey = parsed.apiKey || null;
 
       if (!message && !imageData) {
         res.writeHead(400, { "Content-Type": "application/json" });
         return res.end(JSON.stringify({ ok: false, error: "No message or image provided" }));
       }
 
-      runGemini(message, sessionId, imageData, mimeType, res);
+      runGemini(message, sessionId, imageData, mimeType, apiKey, res);
     });
     return;
   }
