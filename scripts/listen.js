@@ -11,7 +11,7 @@ const port = Number(process.argv[2] || process.env.PORT || 8765);
 function runGemini(prompt, sessionId = null, imageData = null, mimeType = null) {
   return new Promise((resolve, reject) => {
     let tempFile = null;
-    const args = ["--yolo", "-m", "gemini-3-flash-preview", "--output-format", "json"];
+    const args = ["--yolo", "-m", "gemini-3.1-pro-preview", "--output-format", "json"];
     
     if (sessionId) {
       args.push("--resume", sessionId);

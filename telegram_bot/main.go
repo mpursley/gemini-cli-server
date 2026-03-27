@@ -676,7 +676,7 @@ func testAPIKey(apiKey string) bool {
 	}
 
 	req, err := http.NewRequest("POST",
-		"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key="+apiKey,
+		"https://generativelanguage.googleapis.com/v1alpha/models/gemini-3.1-pro-preview:generateContent?key="+apiKey,
 		bytes.NewBuffer(jsonData))
 	if err != nil {
 		return false
@@ -813,7 +813,7 @@ func transcribeVoice(fileID string) (string, error) {
 	}
 
 	req, err := http.NewRequest("POST",
-		"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key="+geminiAPIKey,
+		"https://generativelanguage.googleapis.com/v1alpha/models/gemini-3.1-pro-preview:generateContent?key="+geminiAPIKey,
 		bytes.NewBuffer(jsonData))
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
