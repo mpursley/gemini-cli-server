@@ -8,71 +8,48 @@ const port = Number(process.argv[2] || process.env.PORT || 8765);
 
 
 
-function runGemini(prompt, sessionId = null, imageData = null, mimeType = null) {
-  return new Promise((resolve, reject) => {
-    let tempFile = null;
-    const args = ["--yolo", "-m", "gemini-3.1-pro-preview", "--output-format", "json"];
-    
-    if (sessionId) {
-      args.push("--resume", sessionId);
+function runGemini(prompt, sessionId = null, imageData = null, mimeType = null, res) {
+  let tempFile = null;
+  const args = ["--yolo", "-m", "gemini-3.1-pro-preview", "--output-format", "stream-json"];
+  
+  if (sessionId) {
+    args.push("--resume", sessionId);
+  }
+  
+  let finalPrompt = prompt;
+  if (imageData) {
+    const ext = mimeType === "image/png" ? "png" : "jpg";
+    const fileName = `upload-${Date.now()}.${ext}`;
+    tempFile = path.join(process.cwd(), "uploads", fileName);
+    fs.writeFileSync(tempFile, Buffer.from(imageData, "base64"));
+    finalPrompt = `${prompt} uploads/${fileName}`;
+  }
+  
+  args.push("--prompt", finalPrompt);
+  console.log(`[${new Date().toISOString()}] Executing Gemini Streaming (Session: ${sessionId || "new"})${tempFile ? ` with image` : ""}`);
+  
+  const p = spawn("gemini", args, { stdio: ["ignore", "pipe", "pipe"] });
+  const readline = require("readline");
+  const rl = readline.createInterface({ input: p.stdout });
+  
+  res.writeHead(200, {
+    "Content-Type": "application/x-ndjson",
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive"
+  });
+
+  rl.on("line", (line) => {
+    if (!line.trim()) return;
+    res.write(line + "\n");
+  });
+
+  let errText = "";
+  p.stderr.on("data", d => (errText += d.toString()));
+  p.on("close", code => {
+    if (code !== 0 && code !== null && errText) {
+      res.write(JSON.stringify({ type: "error", error: errText, status: "error" }) + "\n");
     }
-    
-    // Construct the prompt
-    let finalPrompt = prompt;
-
-    if (imageData) {
-      const ext = mimeType === "image/png" ? "png" : "jpg";
-      const fileName = `upload-${Date.now()}.${ext}`;
-      tempFile = path.join(process.cwd(), "uploads", fileName);
-      fs.writeFileSync(tempFile, Buffer.from(imageData, "base64"));
-      
-      // Add the relative path to the prompt string for the agent to find
-      finalPrompt = `${prompt} uploads/${fileName}`;
-    }
-
-    // Use --prompt to ensure non-interactive mode
-    args.push("--prompt", finalPrompt);
-
-    console.log(`[${new Date().toISOString()}] Executing Gemini (Session: ${sessionId || "new"})${tempFile ? ` with image uploads/${path.basename(tempFile)}` : ""}`);
-    
-    const p = spawn("gemini", args, { stdio: ["ignore", "pipe", "pipe"] });
-    
-    let out = "", err = "";
-    p.stdout.on("data", d => (out += d.toString()));
-    p.stderr.on("data", d => (err += d.toString()));
-    p.on("close", code => {
-      if (code === 0 || code === null) {
-        try {
-          // Find the start of the JSON object in case of warnings/logs
-          const jsonStart = out.indexOf('{\n  "session_id"');
-          if (jsonStart === -1) {
-            resolve({ reply: out.trim(), session_id: sessionId });
-          } else {
-            const jsonStr = out.substring(jsonStart);
-            const parsed = JSON.parse(jsonStr);
-            
-            // Extract model name from stats if available
-            let modelName = "";
-            if (parsed.stats && parsed.stats.models) {
-              const models = Object.keys(parsed.stats.models);
-              if (models.length > 0) {
-                modelName = models[0]; // Take the first model mentioned
-              }
-            }
-            
-            resolve({ 
-              reply: parsed.response, 
-              session_id: parsed.session_id,
-              model: modelName
-            });
-          }
-        } catch (e) {
-          resolve({ reply: out.trim(), session_id: sessionId, model: "" });
-        }
-      } else {
-        reject(new Error(err || `exit ${code}`));
-      }
-    });
+    res.end();
   });
 }
 
@@ -152,19 +129,7 @@ const server = http.createServer((req, res) => {
         return res.end(JSON.stringify({ ok: false, error: "No message or image provided" }));
       }
 
-      try {
-        const result = await runGemini(message, sessionId, imageData, mimeType);
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ 
-          ok: true, 
-          reply: result.reply, 
-          sessionId: result.session_id,
-          model: result.model
-        }));
-      } catch (e) {
-        res.writeHead(500, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ ok: false, error: String(e.message || e) }));
-      }
+      runGemini(message, sessionId, imageData, mimeType, res);
     });
     return;
   }
