@@ -370,7 +370,7 @@ func handler(rawEvt interface{}) {
 				if modelName != "" {
 					modelSuffix = fmt.Sprintf(" (%s)", modelName)
 				}
-				finalReply = fmt.Sprintf("🤖 gemini-cli-server v1.1.0\n🆔 Session: %s%s\n\n%s", newSessionID, modelSuffix, finalReply)
+				finalReply = fmt.Sprintf("🤖 gemini-cli-server v1.1.1\n🆔 Session: %s%s\n\n%s", newSessionID, modelSuffix, finalReply)
 			}
 
 			if finalReply == "" {

@@ -383,7 +383,7 @@ func handleMessage(message *tgbotapi.Message) {
 	}
 
 	if oldSessionID == "" && newSessionID != "" {
-		finalReply = fmt.Sprintf("🤖 gemini-cli-server v1.1.0\n🆔 Session: %s%s\n\n%s", newSessionID, modelSuffix, finalReply)
+		finalReply = fmt.Sprintf("🤖 gemini-cli-server v1.1.1\n🆔 Session: %s%s\n\n%s", newSessionID, modelSuffix, finalReply)
 	}
 
 	if finalReply == "" {
@@ -668,7 +668,7 @@ func handleVoiceMessage(message *tgbotapi.Message) {
 	}
 
 	if oldSessionID == "" && newSessionID != "" {
-		finalReply = fmt.Sprintf("🤖 gemini-cli-server v1.1.0\n🆔 Session: %s%s\n\n%s", newSessionID, modelSuffix, finalReply)
+		finalReply = fmt.Sprintf("🤖 gemini-cli-server v1.1.1\n🆔 Session: %s%s\n\n%s", newSessionID, modelSuffix, finalReply)
 	}
 
 	if finalReply == "" {
@@ -790,7 +790,7 @@ func handlePhotoMessage(message *tgbotapi.Message) {
 	}
 
 	if oldSessionID == "" && newSessionID != "" {
-		finalReply = fmt.Sprintf("🤖 gemini-cli-server v1.1.0\n🆔 Session: %s%s\n\n%s", newSessionID, modelSuffix, finalReply)
+		finalReply = fmt.Sprintf("🤖 gemini-cli-server v1.1.1\n🆔 Session: %s%s\n\n%s", newSessionID, modelSuffix, finalReply)
 	}
 
 	if finalReply == "" {
