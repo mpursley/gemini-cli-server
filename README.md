@@ -13,7 +13,7 @@ To get started, you'll need to clone this repository and set up the necessary co
 First, clone the repository to your local machine:
 
 ```bash
-git clone https://github.com/mpursley/gemini_cli_server.git
+git clone https://github.com/mpursley/gemini-cli-server.git
 ```
 
 ### Project Setup

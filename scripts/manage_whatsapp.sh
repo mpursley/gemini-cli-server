@@ -40,8 +40,10 @@ stop_wa() {
     echo -e "${GREEN}✅ WhatsApp Bot stopped.${NC}"
 }
 
+VERSION="v1.1.0"
+
 start_wa() {
-    echo -e "${YELLOW}🚀 Starting WhatsApp Bot...${NC}"
+    echo -e "${YELLOW}🚀 Starting gemini-cli-server (WhatsApp) $VERSION...${NC}"
 
     # 1. Compile
     echo -e "  - Compiling WhatsApp bot..."

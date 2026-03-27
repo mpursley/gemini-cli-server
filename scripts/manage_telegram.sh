@@ -67,8 +67,18 @@ stop_all() {
     echo "✅ All services stopped."
 }
 
+VERSION="v1.1.0"
+
 start_all() {
-    echo "🚀 Starting services..."
+    echo "🚀 Starting gemini-cli-server $VERSION..."
+
+    # 0. Check for port conflicts
+    if lsof -i :8765 > /dev/null 2>&1; then
+        echo "  - ❌ Error: Port 8765 is already in use."
+        echo "    Please stop the conflicting process first:"
+        lsof -i :8765
+        return 1
+    fi
 
     # 1. Start listener
     echo "  - Starting listener..."

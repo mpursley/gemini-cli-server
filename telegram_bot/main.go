@@ -24,6 +24,18 @@ type GeminiPayload struct {
 	SessionID string `json:"sessionId,omitempty"`
 	ImageData string `json:"imageData,omitempty"`
 	MimeType  string `json:"mimeType,omitempty"`
+	ApiKey    string `json:"apiKey,omitempty"`
+}
+
+type StreamChunk struct {
+	Type      string `json:"type"`
+	Role      string `json:"role,omitempty"`
+	Content   string `json:"content,omitempty"`
+	SessionId string `json:"session_id,omitempty"`
+	Model     string `json:"model,omitempty"`
+	ToolName  string `json:"tool_name,omitempty"`
+	Status    string `json:"status,omitempty"`
+	Error     string `json:"error,omitempty"`
 }
 
 type GeminiResponse struct {
@@ -124,8 +136,8 @@ func main() {
 	}
 }
 
-func typingIndicator(ctx context.Context, chatID int64, messageID int) {
-	ticker := time.NewTicker(1 * time.Second)
+func typingIndicator(ctx context.Context, chatID int64, currentMsgID *int) {
+	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
 	dots := "..."
@@ -135,20 +147,34 @@ func typingIndicator(ctx context.Context, chatID int64, messageID int) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			seconds++
-			dots += "."
-			if len(dots) > 15 {
+			seconds += 5
+			dots += ".."
+			if len(dots) > 10 {
 				dots = "..."
 			}
-			// Update the message text with seconds and dots
-			text := fmt.Sprintf("Thinking (%d seconds) %s", seconds, dots)
-			editMsg := tgbotapi.NewEditMessageText(chatID, messageID, text)
-			bot.Send(editMsg)
-			
-			// Refresh the telegram "typing" status every few seconds (it lasts ~5s)
-			if seconds%5 == 0 {
-				bot.Send(tgbotapi.NewChatAction(chatID, tgbotapi.ChatTyping))
+
+			// Every 60 seconds, send a NEW thinking message to "bump" the chat
+			// as requested by the user to avoid any perceived timeouts.
+			if seconds%60 == 0 {
+				text := fmt.Sprintf("Still thinking (%d seconds) %s", seconds, dots)
+				newMsg := tgbotapi.NewMessage(chatID, text)
+				sentMsg, err := bot.Send(newMsg)
+				if err == nil {
+					// Delete the old thinking message to keep the chat clean
+					deleteMsg := tgbotapi.NewDeleteMessage(chatID, *currentMsgID)
+					bot.Request(deleteMsg)
+					// Update the currentMsgID so the final reply goes to this new message
+					*currentMsgID = sentMsg.MessageID
+				}
+			} else {
+				// Otherwise just edit the current message
+				text := fmt.Sprintf("Thinking (%d seconds) %s", seconds, dots)
+				editMsg := tgbotapi.NewEditMessageText(chatID, *currentMsgID, text)
+				bot.Send(editMsg)
 			}
+
+			// Refresh the telegram "typing" status
+			bot.Send(tgbotapi.NewChatAction(chatID, tgbotapi.ChatTyping))
 		}
 	}
 }
@@ -271,37 +297,104 @@ func handleMessage(message *tgbotapi.Message) {
 	}
 
 	// Start typing indicator with the sent message ID
-	ctx, cancel := context.WithCancel(context.Background())
-	go typingIndicator(ctx, message.Chat.ID, sentMsg.MessageID)
+	ctx, cancelIndicator := context.WithCancel(context.Background())
+	currentMsgID := sentMsg.MessageID
+	go typingIndicator(ctx, message.Chat.ID, &currentMsgID)
 
+	// Debounced UI updater for separate thoughts and text
+	type uiUpdate struct {
+		thought string
+		text    string
+	}
+	editChan := make(chan uiUpdate, 100)
+	doneChan := make(chan bool)
+	go func() {
+		var lastEdit time.Time
+		var lastThought string
+		var lastText string
+		thoughtMsgID := currentMsgID
+		var textMsgID int
+
+		timer := time.NewTimer(time.Hour)
+		timer.Stop()
+
+		for {
+			select {
+			case update := <-editChan:
+				if time.Since(lastEdit) > 2*time.Second {
+					// Handle Thought edits
+					if update.thought != lastThought && update.thought != "" {
+						msgInfo := "💭 *Thinking:*\n" + update.thought
+						editMsg := tgbotapi.NewEditMessageText(message.Chat.ID, thoughtMsgID, msgInfo)
+						editMsg.ParseMode = "Markdown"
+						bot.Send(editMsg)
+						lastThought = update.thought
+					}
+
+					// Handle Text response edits
+					if update.text != lastText && update.text != "" {
+						if textMsgID == 0 {
+							// First time we get text, send a new message
+							msg := tgbotapi.NewMessage(message.Chat.ID, update.text)
+							msg.ParseMode = "Markdown"
+							sent, err := bot.Send(msg)
+							if err == nil {
+								textMsgID = sent.MessageID
+							}
+						} else {
+							// Subsequent text updates, edit the second message
+							editMsg := tgbotapi.NewEditMessageText(message.Chat.ID, textMsgID, update.text)
+							editMsg.ParseMode = "Markdown"
+							bot.Send(editMsg)
+						}
+						lastText = update.text
+					}
+					lastEdit = time.Now()
+				} else {
+					timer.Reset(2 * time.Second)
+				}
+			case <-timer.C:
+			case <-doneChan:
+				// Ensure final states are pushed if pending
+				return
+			}
+		}
+	}()
+
+	var finalReply string
 	oldSessionID := userState.SessionID
-	reply, newSessionID, modelName := callGemini(prompt, userState.SessionID, "", "")
-	
-	// Stop the typing indicator before editing the message
-	cancel()
 
-	// Update user state with the session ID returned by Gemini
+	newSessionID, modelName := callGemini(prompt, userState.SessionID, "", "", func(thought string, text string) {
+		finalReply = text
+		editChan <- uiUpdate{thought: thought, text: text}
+	})
+
+	doneChan <- true
+	cancelIndicator()
+
 	if newSessionID != "" {
 		userState.SessionID = newSessionID
 	}
 
-	// Show session ID if it's new or if we just attached/started
-	if oldSessionID == "" && newSessionID != "" {
-		modelSuffix := ""
-		if modelName != "" {
-			modelSuffix = fmt.Sprintf(" (%s)", modelName)
-		}
-		reply = fmt.Sprintf("🆔 Session: %s%s\n\n%s", newSessionID, modelSuffix, reply)
+	modelSuffix := ""
+	if modelName != "" {
+		modelSuffix = fmt.Sprintf(" (%s)", modelName)
 	}
 
-	// Edit the thinking message with the actual reply
-	editMsg := tgbotapi.NewEditMessageText(message.Chat.ID, sentMsg.MessageID, reply)
-	if _, err := bot.Send(editMsg); err != nil {
-		log.Printf("Error editing message: %v", err)
-		// Fallback: send as new message if edit fails
-		msg := tgbotapi.NewMessage(message.Chat.ID, reply)
-		bot.Send(msg)
+	if oldSessionID == "" && newSessionID != "" {
+		finalReply = fmt.Sprintf("🤖 gemini-cli-server v1.1.0\n🆔 Session: %s%s\n\n%s", newSessionID, modelSuffix, finalReply)
 	}
+
+	if finalReply == "" {
+		finalReply = "Done."
+	}
+
+	// Final edit for the text message
+	// If textMsgID was never created (no text arrived), edit the thought one or send new
+	msgInfo := finalReply
+	msg := tgbotapi.NewMessage(message.Chat.ID, msgInfo)
+	msg.ParseMode = "Markdown"
+	bot.Send(msg)
 }
 
 func handleSessionsCommand(message *tgbotapi.Message) {
@@ -358,46 +451,64 @@ func fetchSessions() ([]Session, error) {
 	return sessResp.Sessions, nil
 }
 
-func callGemini(prompt string, sessionId string, imageData string, mimeType string) (string, string, string) {
+func callGemini(prompt string, sessionId string, imageData string, mimeType string, onChunk func(string, string)) (string, string) {
 	payload := GeminiPayload{
 		Source:    "telegram",
 		Message:   prompt,
 		SessionID: sessionId,
 		ImageData: imageData,
 		MimeType:  mimeType,
+		ApiKey:    geminiAPIKey,
 	}
 
 	jsonData, err := json.Marshal(payload)
 	if err != nil {
-		log.Printf("Error marshaling JSON: %v", err)
-		return "❌ Error processing request", "", ""
+		return "❌ Error", ""
 	}
 
-	client := &http.Client{Timeout: 300 * time.Second}
-	log.Printf("Calling Gemini at URL: %s (Session: %s)", geminiURL, sessionId)
+	client := &http.Client{Timeout: 30 * time.Minute}
 	resp, err := client.Post(geminiURL, "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
-		log.Printf("Error calling Gemini: %v", err)
-		return fmt.Sprintf("❌ Error from Gemini server: %v", err), "", ""
+		return "❌ Request error", ""
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		log.Printf("Gemini returned status %d", resp.StatusCode)
-		return fmt.Sprintf("❌ Gemini server error: %d", resp.StatusCode), "", ""
+	decoder := json.NewDecoder(resp.Body)
+	
+	var fullText string
+	var fullThought string
+	var finalSession string
+	var finalModel string
+	
+	for {
+		var chunk StreamChunk
+		if err := decoder.Decode(&chunk); err != nil {
+			break
+		}
+		if chunk.Type == "init" {
+			finalSession = chunk.SessionId
+			finalModel = chunk.Model
+		} else if chunk.Type == "error" {
+			if chunk.Error != "" {
+				fullText += "\n⚠️ " + chunk.Error
+			}
+			onChunk(fullThought, fullText)
+		} else if chunk.Type == "thought" {
+			fullThought += chunk.Content
+			onChunk(fullThought, fullText)
+		} else if chunk.Type == "tool_use" {
+			fullThought += fmt.Sprintf("\n[🛠️ %s...]", chunk.ToolName)
+			onChunk(fullThought, fullText)
+		} else if chunk.Type == "message" && chunk.Role == "assistant" {
+			fullText += chunk.Content
+			onChunk(fullThought, fullText)
+		}
 	}
+	
+	if fullText == "" { fullText = "No reply." }
 
-	var geminiResp GeminiResponse
-	if err := json.NewDecoder(resp.Body).Decode(&geminiResp); err != nil {
-		log.Printf("Error decoding response: %v", err)
-		return "❌ Error parsing response", "", ""
-	}
-
-	if geminiResp.Reply == "" {
-		return "No reply.", geminiResp.SessionID, geminiResp.Model
-	}
-
-	return geminiResp.Reply, geminiResp.SessionID, geminiResp.Model
+	// Post processing to remove thought on final return
+	return finalSession, finalModel
 }
 
 func handleVoiceMessage(message *tgbotapi.Message) {
@@ -475,32 +586,95 @@ func handleVoiceMessage(message *tgbotapi.Message) {
 
 	// Start persistent typing indicator with the message ID
 	indicatorCtx, cancelIndicator := context.WithCancel(context.Background())
-	go typingIndicator(indicatorCtx, message.Chat.ID, sentMsg.MessageID)
+	currentMsgID := sentMsg.MessageID
+	go typingIndicator(indicatorCtx, message.Chat.ID, &currentMsgID)
 
+	// Debounced UI updater for separate thoughts and text
+	type uiUpdate struct {
+		thought string
+		text    string
+	}
+	editChan := make(chan uiUpdate, 100)
+	doneChan := make(chan bool)
+	go func() {
+		var lastEdit time.Time
+		var lastThought string
+		var lastText string
+		thoughtMsgID := currentMsgID
+		var textMsgID int
+
+		timer := time.NewTimer(time.Hour)
+		timer.Stop()
+
+		for {
+			select {
+			case update := <-editChan:
+				if time.Since(lastEdit) > 2*time.Second {
+					if update.thought != lastThought && update.thought != "" {
+						msgInfo := "💭 *Thinking:*\n" + update.thought
+						editMsg := tgbotapi.NewEditMessageText(message.Chat.ID, thoughtMsgID, msgInfo)
+						editMsg.ParseMode = "Markdown"
+						bot.Send(editMsg)
+						lastThought = update.thought
+					}
+					if update.text != lastText && update.text != "" {
+						if textMsgID == 0 {
+							msg := tgbotapi.NewMessage(message.Chat.ID, update.text)
+							msg.ParseMode = "Markdown"
+							sent, err := bot.Send(msg)
+							if err == nil {
+								textMsgID = sent.MessageID
+							}
+						} else {
+							editMsg := tgbotapi.NewEditMessageText(message.Chat.ID, textMsgID, update.text)
+							editMsg.ParseMode = "Markdown"
+							bot.Send(editMsg)
+						}
+						lastText = update.text
+					}
+					lastEdit = time.Now()
+				} else {
+					timer.Reset(2 * time.Second)
+				}
+			case <-timer.C:
+			case <-doneChan:
+				return
+			}
+		}
+	}()
+
+	var finalReply string
 	oldSessionID := userState.SessionID
-	reply, newSessionID, modelName := callGemini(prompt, userState.SessionID, "", "")
+	newSessionID, modelName := callGemini(prompt, userState.SessionID, "", "", func(thought string, text string) {
+		finalReply = text
+		editChan <- uiUpdate{thought: thought, text: text}
+	})
+
+	doneChan <- true
 	
-	// Stop the typing indicator before editing the message
 	cancelIndicator()
 
 	if newSessionID != "" {
 		userState.SessionID = newSessionID
 	}
 
-	if oldSessionID == "" && newSessionID != "" {
-		modelSuffix := ""
-		if modelName != "" {
-			modelSuffix = fmt.Sprintf(" (%s)", modelName)
-		}
-		reply = fmt.Sprintf("🆔 Session: %s%s\n\n%s", newSessionID, modelSuffix, reply)
+	modelSuffix := ""
+	if modelName != "" {
+		modelSuffix = fmt.Sprintf(" (%s)", modelName)
 	}
 
-	editMsg := tgbotapi.NewEditMessageText(message.Chat.ID, sentMsg.MessageID, reply)
-	if _, err := bot.Send(editMsg); err != nil {
-		log.Printf("Error editing message: %v", err)
-		msg := tgbotapi.NewMessage(message.Chat.ID, reply)
-		bot.Send(msg)
+	if oldSessionID == "" && newSessionID != "" {
+		finalReply = fmt.Sprintf("🤖 gemini-cli-server v1.1.0\n🆔 Session: %s%s\n\n%s", newSessionID, modelSuffix, finalReply)
 	}
+
+	if finalReply == "" {
+		finalReply = "Done."
+	}
+
+	msgInfo := finalReply
+	msg := tgbotapi.NewMessage(message.Chat.ID, msgInfo)
+	msg.ParseMode = "Markdown"
+	bot.Send(msg)
 }
 
 func handlePhotoMessage(message *tgbotapi.Message) {
@@ -534,32 +708,95 @@ func handlePhotoMessage(message *tgbotapi.Message) {
 
 	// Start persistent typing indicator
 	indicatorCtx, cancelIndicator := context.WithCancel(context.Background())
-	go typingIndicator(indicatorCtx, message.Chat.ID, sentMsg.MessageID)
+	currentMsgID := sentMsg.MessageID
+	go typingIndicator(indicatorCtx, message.Chat.ID, &currentMsgID)
 
+	// Debounced UI updater for separate thoughts and text
+	type uiUpdate struct {
+		thought string
+		text    string
+	}
+	editChan := make(chan uiUpdate, 100)
+	doneChan := make(chan bool)
+	go func() {
+		var lastEdit time.Time
+		var lastThought string
+		var lastText string
+		thoughtMsgID := currentMsgID
+		var textMsgID int
+
+		timer := time.NewTimer(time.Hour)
+		timer.Stop()
+
+		for {
+			select {
+			case update := <-editChan:
+				if time.Since(lastEdit) > 2*time.Second {
+					if update.thought != lastThought && update.thought != "" {
+						msgInfo := "💭 *Thinking:*\n" + update.thought
+						editMsg := tgbotapi.NewEditMessageText(message.Chat.ID, thoughtMsgID, msgInfo)
+						editMsg.ParseMode = "Markdown"
+						bot.Send(editMsg)
+						lastThought = update.thought
+					}
+					if update.text != lastText && update.text != "" {
+						if textMsgID == 0 {
+							msg := tgbotapi.NewMessage(message.Chat.ID, update.text)
+							msg.ParseMode = "Markdown"
+							sent, err := bot.Send(msg)
+							if err == nil {
+								textMsgID = sent.MessageID
+							}
+						} else {
+							editMsg := tgbotapi.NewEditMessageText(message.Chat.ID, textMsgID, update.text)
+							editMsg.ParseMode = "Markdown"
+							bot.Send(editMsg)
+						}
+						lastText = update.text
+					}
+					lastEdit = time.Now()
+				} else {
+					timer.Reset(2 * time.Second)
+				}
+			case <-timer.C:
+			case <-doneChan:
+				return
+			}
+		}
+	}()
+
+	var finalReply string
 	oldSessionID := userState.SessionID
-	reply, newSessionID, modelName := callGemini(prompt, userState.SessionID, imageData, "image/jpeg")
+	newSessionID, modelName := callGemini(prompt, userState.SessionID, imageData, "image/jpeg", func(thought string, text string) {
+		finalReply = text
+		editChan <- uiUpdate{thought: thought, text: text}
+	})
+
+	doneChan <- true
 	
-	// Stop the typing indicator before editing the message
 	cancelIndicator()
 
 	if newSessionID != "" {
 		userState.SessionID = newSessionID
 	}
 
-	if oldSessionID == "" && newSessionID != "" {
-		modelSuffix := ""
-		if modelName != "" {
-			modelSuffix = fmt.Sprintf(" (%s)", modelName)
-		}
-		reply = fmt.Sprintf("🆔 Session: %s%s\n\n%s", newSessionID, modelSuffix, reply)
+	modelSuffix := ""
+	if modelName != "" {
+		modelSuffix = fmt.Sprintf(" (%s)", modelName)
 	}
 
-	editMsg := tgbotapi.NewEditMessageText(message.Chat.ID, sentMsg.MessageID, reply)
-	if _, err := bot.Send(editMsg); err != nil {
-		log.Printf("Error editing message: %v", err)
-		msg := tgbotapi.NewMessage(message.Chat.ID, reply)
-		bot.Send(msg)
+	if oldSessionID == "" && newSessionID != "" {
+		finalReply = fmt.Sprintf("🤖 gemini-cli-server v1.1.0\n🆔 Session: %s%s\n\n%s", newSessionID, modelSuffix, finalReply)
 	}
+
+	if finalReply == "" {
+		finalReply = "Done."
+	}
+
+	msgInfo := finalReply
+	msg := tgbotapi.NewMessage(message.Chat.ID, msgInfo)
+	msg.ParseMode = "Markdown"
+	bot.Send(msg)
 }
 
 func downloadFileAsBase64(fileID string) (string, error) {
@@ -659,7 +896,7 @@ func testAPIKey(apiKey string) bool {
 	}
 
 	req, err := http.NewRequest("POST",
-		"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key="+apiKey,
+		"https://generativelanguage.googleapis.com/v1alpha/models/gemini-3.1-pro-preview:generateContent?key="+apiKey,
 		bytes.NewBuffer(jsonData))
 	if err != nil {
 		return false
@@ -796,7 +1033,7 @@ func transcribeVoice(fileID string) (string, error) {
 	}
 
 	req, err := http.NewRequest("POST",
-		"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key="+geminiAPIKey,
+		"https://generativelanguage.googleapis.com/v1alpha/models/gemini-3.1-pro-preview:generateContent?key="+geminiAPIKey,
 		bytes.NewBuffer(jsonData))
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)

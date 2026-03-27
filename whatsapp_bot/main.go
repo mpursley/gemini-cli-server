@@ -17,7 +17,6 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/mdp/qrterminal/v3"
 	"go.mau.fi/whatsmeow"
-	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
@@ -32,6 +31,18 @@ type GeminiPayload struct {
 	SessionID string `json:"sessionId,omitempty"`
 	ImageData string `json:"imageData,omitempty"`
 	MimeType  string `json:"mimeType,omitempty"`
+	ApiKey    string `json:"apiKey,omitempty"`
+}
+
+type StreamChunk struct {
+	Type      string `json:"type"`
+	Role      string `json:"role,omitempty"`
+	Content   string `json:"content,omitempty"`
+	SessionId string `json:"session_id,omitempty"`
+	Model     string `json:"model,omitempty"`
+	ToolName  string `json:"tool_name,omitempty"`
+	Status    string `json:"status,omitempty"`
+	Error     string `json:"error,omitempty"`
 }
 
 type GeminiResponse struct {
@@ -44,6 +55,7 @@ var (
 	client       *whatsmeow.Client
 	geminiURL    string
 	targetJID    string
+	geminiAPIKey string
 	userSessions = make(map[string]string) // Map JID to SessionID
 )
 
@@ -55,16 +67,27 @@ func boolPtr(b bool) *bool {
 	return &b
 }
 
-func main() {
-	if err := godotenv.Load(); err != nil {
-		log.Printf("Warning: .env file not found")
+func initVars() {
+	err := godotenv.Load()
+	if err != nil {
+		log.Println("No .env file found or error loading it. Relying on environment variables.")
 	}
 
 	geminiURL = os.Getenv("GEMINI_ENDPOINT")
 	if geminiURL == "" {
 		geminiURL = "http://127.0.0.1:8765/event"
 	}
+	
+	geminiAPIKey = os.Getenv("GEMINI_API_KEY")
+
 	targetJID = os.Getenv("TARGET_JID")
+	if targetJID == "" {
+		log.Fatal("TARGET_JID is missing. Please set it in your .env or as an environment variable.")
+	}
+}
+
+func main() {
+	initVars()
 
 	dbLog := waLog.Stdout("Database", "INFO", true)
 	container, err := sqlstore.New(context.Background(), "sqlite3", "file:whatsapp_bot.db?_foreign_keys=on", dbLog)
@@ -126,12 +149,10 @@ func main() {
 	client.Disconnect()
 }
 
-func typingIndicator(ctx context.Context, chat types.JID, messageKey *waCommon.MessageKey) {
-	ticker := time.NewTicker(1 * time.Second)
+func typingIndicator(ctx context.Context, chat types.JID) {
+	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
-	dots := "..."
-	seconds := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -139,31 +160,8 @@ func typingIndicator(ctx context.Context, chat types.JID, messageKey *waCommon.M
 			client.SendChatPresence(context.Background(), chat, types.ChatPresencePaused, types.ChatPresenceMediaText)
 			return
 		case <-ticker.C:
-			seconds++
-			dots += "."
-			if len(dots) > 10 {
-				dots = "..."
-			}
-
-			// Refresh the "composing" status every few seconds
-			if seconds%5 == 0 {
-				client.SendChatPresence(context.Background(), chat, types.ChatPresenceComposing, types.ChatPresenceMediaText)
-			}
-
-			// Edit the "Thinking..." message
-			newText := fmt.Sprintf("Thinking (%d seconds) %s", seconds, dots)
-			
-			// To edit a message in WhatsApp, we send a ProtocolMessage referencing the original message key
-			editMsg := &waE2E.Message{
-				ProtocolMessage: &waE2E.ProtocolMessage{
-					Type: waE2E.ProtocolMessage_MESSAGE_EDIT.Enum(),
-					Key:  messageKey,
-					EditedMessage: &waE2E.Message{
-						Conversation: &newText,
-					},
-				},
-			}
-			client.SendMessage(context.Background(), chat, editMsg)
+			// Refresh the "composing" status
+			client.SendChatPresence(context.Background(), chat, types.ChatPresenceComposing, types.ChatPresenceMediaText)
 		}
 	}
 }
@@ -279,26 +277,85 @@ func handler(rawEvt interface{}) {
 				prompt = "What is in this image?"
 			}
 
-			// Send initial thinking message
-			client.SendChatPresence(context.Background(), evt.Info.Chat, types.ChatPresenceComposing, types.ChatPresenceMediaText)
-			thinkingMsg := "Thinking..."
-			resp, err := client.SendMessage(context.Background(), evt.Info.Chat, &waE2E.Message{Conversation: &thinkingMsg})
-			if err != nil {
-				log.Printf("Error sending thinking message: %v", err)
-			}
-
-			// Construct the MessageKey for editing
-			thinkingMsgKey := &waCommon.MessageKey{
-				FromMe:    boolPtr(true),
-				ID:        &resp.ID,
-				RemoteJID: strPtr(evt.Info.Chat.String()),
-			}
-
-			// Start typing indicator status updates
+			// Start persistent typing indicator
 			indicatorCtx, cancelIndicator := context.WithCancel(context.Background())
-			go typingIndicator(indicatorCtx, evt.Info.Chat, thinkingMsgKey)
+			go typingIndicator(indicatorCtx, evt.Info.Chat)
 
-			reply, newSessionID, modelName := callGemini(prompt, sessionID, imageData, mimeType)
+			// Debounced UI updater
+			type uiUpdate struct {
+				thought string
+				text    string
+			}
+			editChan := make(chan uiUpdate, 100)
+			doneChan := make(chan bool)
+			go func() {
+				var lastEdit time.Time
+				var lastThought string
+				var lastText string
+				var thoughtMsgID string
+				var textMsgID string
+
+				timer := time.NewTimer(time.Hour)
+				timer.Stop()
+
+				for {
+					select {
+					case update := <-editChan:
+						if time.Since(lastEdit) > 2*time.Second {
+							if update.thought != lastThought && update.thought != "" {
+								msgInfo := "💭 *Thinking:*\n" + update.thought
+								if thoughtMsgID == "" {
+									sentMsg, _ := client.SendMessage(context.Background(), evt.Info.Chat, &waE2E.Message{
+										Conversation: &msgInfo,
+									})
+									if sentMsg.ID != "" {
+										thoughtMsgID = sentMsg.ID
+									}
+								} else {
+									client.SendMessage(context.Background(), evt.Info.Chat, client.BuildEdit(evt.Info.Chat, thoughtMsgID, &waE2E.Message{
+										Conversation: &msgInfo,
+									}))
+								}
+								lastThought = update.thought
+							}
+							if update.text != lastText && update.text != "" {
+								if textMsgID == "" {
+									sentMsg, _ := client.SendMessage(context.Background(), evt.Info.Chat, &waE2E.Message{
+										Conversation: &update.text,
+									})
+									if sentMsg.ID != "" {
+										textMsgID = sentMsg.ID
+									}
+								} else {
+									client.SendMessage(context.Background(), evt.Info.Chat, client.BuildEdit(evt.Info.Chat, textMsgID, &waE2E.Message{
+										Conversation: &update.text,
+									}))
+								}
+								lastText = update.text
+							}
+							lastEdit = time.Now()
+							timer.Stop()
+						} else {
+							timer.Reset(2 * time.Second)
+						}
+					case <-timer.C:
+						if len(editChan) > 0 {
+							// For simplistic flushing
+						}
+					case <-doneChan:
+						timer.Stop()
+						return
+					}
+				}
+			}()
+
+			var finalReply string
+			newSessionID, modelName := callGemini(prompt, sessionID, imageData, mimeType, func(thought string, text string) {
+				finalReply = text
+				editChan <- uiUpdate{thought: thought, text: text}
+			})
+			
+			doneChan <- true
 			
 			// Stop the indicator before sending the reply
 			cancelIndicator()
@@ -312,11 +369,15 @@ func handler(rawEvt interface{}) {
 				if modelName != "" {
 					modelSuffix = fmt.Sprintf(" (%s)", modelName)
 				}
-				reply = fmt.Sprintf("🆔 Session: %s%s\n\n%s", newSessionID, modelSuffix, reply)
+				finalReply = fmt.Sprintf("🤖 gemini-cli-server v1.1.0\n🆔 Session: %s%s\n\n%s", newSessionID, modelSuffix, finalReply)
+			}
+
+			if finalReply == "" {
+				finalReply = "Done."
 			}
 
 			client.SendMessage(context.Background(), evt.Info.Chat, &waE2E.Message{
-				Conversation: &reply,
+				Conversation: &finalReply,
 			})
 		}(evt)
 	}
@@ -371,39 +432,61 @@ func fetchSessions() ([]Session, error) {
 	return sessResp.Sessions, nil
 }
 
-func callGemini(prompt string, sessionId string, imageData string, mimeType string) (string, string, string) {
+func callGemini(prompt string, sessionId string, imageData string, mimeType string, onChunk func(string, string)) (string, string) {
 	payload := GeminiPayload{
 		Source:    "whatsapp",
 		Message:   prompt,
 		SessionID: sessionId,
 		ImageData: imageData,
 		MimeType:  mimeType,
+		ApiKey:    geminiAPIKey,
 	}
 
 	jsonData, err := json.Marshal(payload)
 	if err != nil {
-		log.Printf("Error marshaling JSON: %v", err)
-		return "❌ Error processing request", "", ""
+		return "❌ Error", ""
 	}
 
-	httpClient := &http.Client{Timeout: 300 * time.Second}
+	httpClient := &http.Client{Timeout: 30 * time.Minute}
 	resp, err := httpClient.Post(geminiURL, "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
-		log.Printf("Error calling Gemini: %v", err)
-		return fmt.Sprintf("❌ Error from Gemini server: %v", err), "", ""
+		return "❌ Request error", ""
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		log.Printf("Gemini returned status %d", resp.StatusCode)
-		return fmt.Sprintf("❌ Gemini server error: %d", resp.StatusCode), "", ""
+	decoder := json.NewDecoder(resp.Body)
+	
+	var fullText string
+	var fullThought string
+	var finalSession string
+	var finalModel string
+	
+	for {
+		var chunk StreamChunk
+		if err := decoder.Decode(&chunk); err != nil {
+			break
+		}
+		if chunk.Type == "init" {
+			finalSession = chunk.SessionId
+			finalModel = chunk.Model
+		} else if chunk.Type == "error" {
+			if chunk.Error != "" {
+				fullText += "\n⚠️ " + chunk.Error
+			}
+			onChunk(fullThought, fullText)
+		} else if chunk.Type == "thought" {
+			fullThought += chunk.Content
+			onChunk(fullThought, fullText)
+		} else if chunk.Type == "tool_use" {
+			fullThought += fmt.Sprintf("\n[🛠️ %s...]", chunk.ToolName)
+			onChunk(fullThought, fullText)
+		} else if chunk.Type == "message" && chunk.Role == "assistant" {
+			fullText += chunk.Content
+			onChunk(fullThought, fullText)
+		}
 	}
+	
+	if fullText == "" { fullText = "No reply." }
 
-	var geminiResp GeminiResponse
-	if err := json.NewDecoder(resp.Body).Decode(&geminiResp); err != nil {
-		log.Printf("Error decoding response: %v", err)
-		return "❌ Error parsing response", "", ""
-	}
-
-	return geminiResp.Reply, geminiResp.SessionID, geminiResp.Model
+	return finalSession, finalModel
 }
