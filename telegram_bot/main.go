@@ -30,6 +30,7 @@ type GeminiPayload struct {
 type StreamChunk struct {
 	Type      string `json:"type"`
 	Role      string `json:"role,omitempty"`
+	Subject   string `json:"subject,omitempty"`
 	Content   string `json:"content,omitempty"`
 	SessionId string `json:"session_id,omitempty"`
 	Model     string `json:"model,omitempty"`
@@ -382,7 +383,7 @@ func handleMessage(message *tgbotapi.Message) {
 	}
 
 	if oldSessionID == "" && newSessionID != "" {
-		finalReply = fmt.Sprintf("🤖 gemini-cli-server v1.1.0\n🆔 Session: %s%s\n\n%s", newSessionID, modelSuffix, finalReply)
+		finalReply = fmt.Sprintf("🤖 gemini-cli-server v1.1.1\n🆔 Session: %s%s\n\n%s", newSessionID, modelSuffix, finalReply)
 	}
 
 	if finalReply == "" {
@@ -494,6 +495,9 @@ func callGemini(prompt string, sessionId string, imageData string, mimeType stri
 			}
 			onChunk(fullThought, fullText)
 		} else if chunk.Type == "thought" {
+			if chunk.Subject != "" {
+				fullThought += fmt.Sprintf("[%s] ", chunk.Subject)
+			}
 			fullThought += chunk.Content
 			onChunk(fullThought, fullText)
 		} else if chunk.Type == "tool_use" {
@@ -664,7 +668,7 @@ func handleVoiceMessage(message *tgbotapi.Message) {
 	}
 
 	if oldSessionID == "" && newSessionID != "" {
-		finalReply = fmt.Sprintf("🤖 gemini-cli-server v1.1.0\n🆔 Session: %s%s\n\n%s", newSessionID, modelSuffix, finalReply)
+		finalReply = fmt.Sprintf("🤖 gemini-cli-server v1.1.1\n🆔 Session: %s%s\n\n%s", newSessionID, modelSuffix, finalReply)
 	}
 
 	if finalReply == "" {
@@ -786,7 +790,7 @@ func handlePhotoMessage(message *tgbotapi.Message) {
 	}
 
 	if oldSessionID == "" && newSessionID != "" {
-		finalReply = fmt.Sprintf("🤖 gemini-cli-server v1.1.0\n🆔 Session: %s%s\n\n%s", newSessionID, modelSuffix, finalReply)
+		finalReply = fmt.Sprintf("🤖 gemini-cli-server v1.1.1\n🆔 Session: %s%s\n\n%s", newSessionID, modelSuffix, finalReply)
 	}
 
 	if finalReply == "" {
