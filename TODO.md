@@ -9,10 +9,10 @@
 [D] : Done, tast/subtask on complete
 
 ## Sessions & Persistence
-- [C] **Implement `/save` command:** Enable the ability to save the current session with a custom name.
-    - [C] Note: This requires updates to the `gemini-cli` repository to support a native save/rename function via the API/CLI Some changes were added to support this feature.. we need to test it out
+- [D] **Implement `/save` command:** Enable the ability to save the current session with a custom name.
+    - [D] Note: This requires updates to the `gemini-cli` repository to support a native save/rename function via the API/CLI Some changes were added to support this feature.. we need to test it out
 
-- [C] **UI Consistency:** Add a prefix/header to the `Reply:` message in Telegram/WhatsApp (similar to the `💭 Thinking:` indicator) to clearly distinguish bot responses.
+- [D] **UI Consistency:** Add a prefix/header to the `Reply:` message in Telegram/WhatsApp (similar to the `💭 Thinking:` indicator) to clearly distinguish bot responses.
 
 ## Logging & Auditing
 - [ ] **Per-Session Logging:** Add a (Default) option to write all session text into individual log files.
