@@ -352,6 +352,9 @@ func handler(rawEvt interface{}) {
 
 			var finalReply string
 			newSessionID, modelName := callGemini(prompt, sessionID, imageData, mimeType, func(thought string, text string) {
+				if text != "" {
+					text = "🤖 *Reply:*\n" + text
+				}
 				finalReply = text
 				editChan <- uiUpdate{thought: thought, text: text}
 			})

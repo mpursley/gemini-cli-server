@@ -450,6 +450,9 @@ func handleMessage(message *tgbotapi.Message) {
 	oldSessionID := userState.SessionID
 
 	newSessionID, modelName := callGemini(prompt, userState.SessionID, "", "", func(thought string, text string) {
+		if text != "" {
+			text = "🤖 *Reply:*\n" + text
+		}
 		finalReply = text
 		editChan <- uiUpdate{thought: thought, text: text}
 	})
@@ -682,6 +685,9 @@ func handleVoiceMessage(message *tgbotapi.Message) {
 	var finalReply string
 	oldSessionID := userState.SessionID
 	newSessionID, modelName := callGemini(prompt, userState.SessionID, "", "", func(thought string, text string) {
+		if text != "" {
+			text = "🤖 *Reply:*\n" + text
+		}
 		finalReply = text
 		editChan <- uiUpdate{thought: thought, text: text}
 	})
@@ -749,6 +755,9 @@ func handlePhotoMessage(message *tgbotapi.Message) {
 	var finalReply string
 	oldSessionID := userState.SessionID
 	newSessionID, modelName := callGemini(prompt, userState.SessionID, imageData, "image/jpeg", func(thought string, text string) {
+		if text != "" {
+			text = "🤖 *Reply:*\n" + text
+		}
 		finalReply = text
 		editChan <- uiUpdate{thought: thought, text: text}
 	})
