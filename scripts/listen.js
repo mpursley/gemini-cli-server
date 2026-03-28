@@ -10,8 +10,39 @@ const port = Number(process.argv[2] || process.env.PORT || 8765);
 
 function runGemini(prompt, sessionId = null, imageData = null, mimeType = null, apiKey = null, res) {
   let tempFile = null;
-  const args = ["--yolo", "-m", "gemini-3.1-pro-preview", "--output-format", "stream-json"];
+  let args = ["--yolo", "-m", "gemini-3.1-pro-preview", "--output-format", "stream-json"];
   
+  // Special handling for /resume save <name>
+  const resumeSaveMatch = prompt.match(/\/resume save (.+)/);
+  if (resumeSaveMatch) {
+    const sessionName = resumeSaveMatch[1].trim();
+    if (sessionName && sessionId) {
+      args = ["--resume", sessionId, "--save-session", sessionName];
+      console.log(`[${new Date().toISOString()}] Saving session ${sessionId} as "${sessionName}"`);
+      
+      const envVars = Object.assign({}, process.env);
+      if (apiKey) envVars.GEMINI_API_KEY = apiKey;
+      
+      let cliCommand = "gemini";
+      let cliArgs = args;
+      const localDevBundle = process.env.HOME + "/dev/gemini-cli/bundle/gemini.js";
+      if (fs.existsSync(localDevBundle)) {
+        cliCommand = "node";
+        cliArgs = [localDevBundle, ...args];
+      }
+      
+      const p = spawnSync(cliCommand, cliArgs, { env: envVars, encoding: "utf8" });
+      res.writeHead(200, { "Content-Type": "application/x-ndjson" });
+      if (p.status === 0) {
+        res.write(JSON.stringify({ type: "message", role: "assistant", content: `✅ Session saved as: ${sessionName}` }) + "\n");
+      } else {
+        res.write(JSON.stringify({ type: "error", error: p.stderr || "Failed to save session" }) + "\n");
+      }
+      res.end();
+      return;
+    }
+  }
+
   if (sessionId) {
     args.push("--resume", sessionId);
   }
@@ -20,9 +51,9 @@ function runGemini(prompt, sessionId = null, imageData = null, mimeType = null, 
   if (imageData) {
     const ext = mimeType === "image/png" ? "png" : "jpg";
     const fileName = `upload-${Date.now()}.${ext}`;
-    tempFile = path.join(process.cwd(), "uploads", fileName);
+    tempFile = path.join(__dirname, "..", "uploads", fileName);
     fs.writeFileSync(tempFile, Buffer.from(imageData, "base64"));
-    finalPrompt = `${prompt} uploads/${fileName}`;
+    finalPrompt = `${prompt} ${tempFile}`;
   }
   
   args.push("--prompt", finalPrompt);

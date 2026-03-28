@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -111,8 +112,10 @@ func main() {
 	commands := []tgbotapi.BotCommand{
 		{Command: "sessions", Description: "List recent sessions"},
 		{Command: "attach", Description: "Attach to a session (e.g. /attach ID)"},
+		{Command: "save", Description: "Save current session (e.g. /save name)"},
 		{Command: "new", Description: "Start a new session"},
 		{Command: "status", Description: "Show current session status"},
+		{Command: "restart", Description: "Restart the Telegram bot and server"},
 	}
 	config := tgbotapi.NewSetMyCommands(commands...)
 	if _, err := bot.Request(config); err != nil {
@@ -137,7 +140,118 @@ func main() {
 	}
 }
 
-func typingIndicator(ctx context.Context, chatID int64, currentMsgID *int) {
+type uiUpdate struct {
+	thought string
+	text    string
+	timer   string
+	bump    bool
+}
+
+func startUIUpdater(ctx context.Context, chatID int64, initialMsgID int) (chan uiUpdate, chan bool) {
+	editChan := make(chan uiUpdate, 100)
+	doneChan := make(chan bool)
+
+	go typingIndicator(ctx, chatID, editChan)
+
+	go func() {
+		var lastEdit time.Time
+		var lastThought string
+		var lastText string
+		var lastTimer string
+		thoughtMsgID := initialMsgID
+		var textMsgID int
+
+		timer := time.NewTimer(time.Hour)
+		timer.Stop()
+
+		for {
+			select {
+			case update := <-editChan:
+				if update.thought != "" {
+					lastThought = update.thought
+				}
+				if update.text != "" {
+					lastText = update.text
+				}
+				if update.timer != "" {
+					lastTimer = update.timer
+				}
+
+				if update.bump {
+					msgInfo := "💭 *Thinking:*\n" + lastThought
+					if lastTimer != "" {
+						msgInfo += "\n\n_" + lastTimer + "_"
+					}
+					newMsg := tgbotapi.NewMessage(chatID, msgInfo)
+					newMsg.ParseMode = "Markdown"
+					sent, err := bot.Send(newMsg)
+					if err == nil {
+						deleteMsg := tgbotapi.NewDeleteMessage(chatID, thoughtMsgID)
+						bot.Request(deleteMsg)
+						thoughtMsgID = sent.MessageID
+					}
+				}
+
+				if time.Since(lastEdit) > 2*time.Second {
+					// Handle Thought edits
+					if lastThought != "" || lastTimer != "" {
+						msgInfo := "💭 *Thinking:*\n" + lastThought
+						if lastTimer != "" {
+							msgInfo += "\n\n_" + lastTimer + "_"
+						}
+						editMsg := tgbotapi.NewEditMessageText(chatID, thoughtMsgID, msgInfo)
+						editMsg.ParseMode = "Markdown"
+						bot.Send(editMsg)
+					}
+
+					// Handle Text response edits
+					if lastText != "" {
+						if textMsgID == 0 {
+							// First time we get text, send a new message
+							msg := tgbotapi.NewMessage(chatID, lastText)
+							msg.ParseMode = "Markdown"
+							sent, err := bot.Send(msg)
+							if err == nil {
+								textMsgID = sent.MessageID
+							}
+						} else {
+							// Subsequent text updates, edit the second message
+							editMsg := tgbotapi.NewEditMessageText(chatID, textMsgID, lastText)
+							editMsg.ParseMode = "Markdown"
+							bot.Send(editMsg)
+						}
+					}
+					lastEdit = time.Now()
+				} else {
+					timer.Reset(2 * time.Second)
+				}
+			case <-timer.C:
+				// Push final update
+				if lastThought != "" || lastTimer != "" {
+					msgInfo := "💭 *Thinking:*\n" + lastThought
+					if lastTimer != "" {
+						msgInfo += "\n\n_" + lastTimer + "_"
+					}
+					editMsg := tgbotapi.NewEditMessageText(chatID, thoughtMsgID, msgInfo)
+					editMsg.ParseMode = "Markdown"
+					bot.Send(editMsg)
+				}
+				if lastText != "" && textMsgID != 0 {
+					editMsg := tgbotapi.NewEditMessageText(chatID, textMsgID, lastText)
+					editMsg.ParseMode = "Markdown"
+					bot.Send(editMsg)
+				}
+				lastEdit = time.Now()
+			case <-doneChan:
+				return
+			}
+		}
+	}()
+
+	return editChan, doneChan
+}
+
+func typingIndicator(ctx context.Context, chatID int64, editChan chan uiUpdate) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
@@ -154,25 +268,14 @@ func typingIndicator(ctx context.Context, chatID int64, currentMsgID *int) {
 				dots = "..."
 			}
 
-			// Every 60 seconds, send a NEW thinking message to "bump" the chat
-			// as requested by the user to avoid any perceived timeouts.
+			timerText := fmt.Sprintf("Thinking (%d seconds) %s", seconds, dots)
+			bump := false
 			if seconds%60 == 0 {
-				text := fmt.Sprintf("Still thinking (%d seconds) %s", seconds, dots)
-				newMsg := tgbotapi.NewMessage(chatID, text)
-				sentMsg, err := bot.Send(newMsg)
-				if err == nil {
-					// Delete the old thinking message to keep the chat clean
-					deleteMsg := tgbotapi.NewDeleteMessage(chatID, *currentMsgID)
-					bot.Request(deleteMsg)
-					// Update the currentMsgID so the final reply goes to this new message
-					*currentMsgID = sentMsg.MessageID
-				}
-			} else {
-				// Otherwise just edit the current message
-				text := fmt.Sprintf("Thinking (%d seconds) %s", seconds, dots)
-				editMsg := tgbotapi.NewEditMessageText(chatID, *currentMsgID, text)
-				bot.Send(editMsg)
+				timerText = fmt.Sprintf("Still thinking (%d seconds) %s", seconds, dots)
+				bump = true
 			}
+
+			editChan <- uiUpdate{timer: timerText, bump: bump}
 
 			// Refresh the telegram "typing" status
 			bot.Send(tgbotapi.NewChatAction(chatID, tgbotapi.ChatTyping))
@@ -240,13 +343,32 @@ func handleMessage(message *tgbotapi.Message) {
 
 		switch command {
 		case "/start":
-			msg := tgbotapi.NewMessage(message.Chat.ID, "👋 Welcome! I'm your Gemini assistant. Send me a message or a voice note to get started.\n\nCommands:\n/sessions - List recent sessions\n/attach <id> - Attach to a session\n/new - Start a new session")
+			msg := tgbotapi.NewMessage(message.Chat.ID, "👋 Welcome! I'm your Gemini assistant. Send me a message or a voice note to get started.\n\nCommands:\n/sessions - List recent sessions\n/attach <id> - Attach to a session\n/save <name> - Save current session\n/new - Start a new session\n/restart - Restart the bot and server")
 			bot.Send(msg)
 			return
 		case "/new":
 			userState.SessionID = ""
 			msg := tgbotapi.NewMessage(message.Chat.ID, "🆕 Started a new session.")
 			bot.Send(msg)
+			return
+		case "/restart":
+			msg := tgbotapi.NewMessage(message.Chat.ID, "🔄 Restarting gemini-cli-server...")
+			bot.Send(msg)
+			
+			// Get the absolute path to the manage script
+			repoDir := os.Getenv("HOME") + "/dev/gemini-cli-server"
+			scriptPath := repoDir + "/scripts/manage_telegram.sh"
+			
+			// Run the restart command in the background
+			go func() {
+				// Wait a brief moment for the "Restarting..." message to be sent
+				time.Sleep(1 * time.Second)
+				
+				// Execute the restart script
+				// Note: Since this will kill the current process, we use a separate shell session
+				// and don't care about the result here as the process will terminate.
+				spawnRestart(scriptPath, repoDir)
+			}()
 			return
 		case "/status":
 			sessionID := "None"
@@ -272,6 +394,24 @@ func handleMessage(message *tgbotapi.Message) {
 			msg.ParseMode = "Markdown"
 			bot.Send(msg)
 			return
+		case "/save":
+			if len(parts) < 2 {
+				msg := tgbotapi.NewMessage(message.Chat.ID, "❌ Please provide a name. Example: `/save my_session`")
+				msg.ParseMode = "Markdown"
+				bot.Send(msg)
+				return
+			}
+			if userState.SessionID == "" {
+				msg := tgbotapi.NewMessage(message.Chat.ID, "❌ You do not have an active session to save. Please start chatting first or use `/attach <id>` to resume an old session.")
+				msg.ParseMode = "Markdown"
+				bot.Send(msg)
+				return
+			}
+			// Transform to the native CLI command and let it fall through to be sent to the backend
+			text = "/resume save " + strings.Join(parts[1:], " ")
+		default:
+			// Let unknown commands fall through as regular text if needed, or return
+			// But since we fall through on /save, we just let the switch finish.
 		}
 	}
 
@@ -287,6 +427,11 @@ func handleMessage(message *tgbotapi.Message) {
 	prompt = fmt.Sprintf("%sYou are an assistant in a Telegram chat.\nAnswer this message:\n\n%s: %s",
 		ctxText, message.From.FirstName, text)
 
+	// Special case for administrative commands intended for the backend
+	if strings.HasPrefix(text, "/resume save ") {
+		prompt = text
+	}
+
 	// Send initial thinking message
 	thinkingMsg := tgbotapi.NewMessage(message.Chat.ID, "Thinking...")
 	if message.ReplyToMessage != nil {
@@ -297,70 +442,9 @@ func handleMessage(message *tgbotapi.Message) {
 		log.Printf("Error sending thinking message: %v", err)
 	}
 
-	// Start typing indicator with the sent message ID
+	// Start typing indicator and UI updater
 	ctx, cancelIndicator := context.WithCancel(context.Background())
-	currentMsgID := sentMsg.MessageID
-	go typingIndicator(ctx, message.Chat.ID, &currentMsgID)
-
-	// Debounced UI updater for separate thoughts and text
-	type uiUpdate struct {
-		thought string
-		text    string
-	}
-	editChan := make(chan uiUpdate, 100)
-	doneChan := make(chan bool)
-	go func() {
-		var lastEdit time.Time
-		var lastThought string
-		var lastText string
-		thoughtMsgID := currentMsgID
-		var textMsgID int
-
-		timer := time.NewTimer(time.Hour)
-		timer.Stop()
-
-		for {
-			select {
-			case update := <-editChan:
-				if time.Since(lastEdit) > 2*time.Second {
-					// Handle Thought edits
-					if update.thought != lastThought && update.thought != "" {
-						msgInfo := "💭 *Thinking:*\n" + update.thought
-						editMsg := tgbotapi.NewEditMessageText(message.Chat.ID, thoughtMsgID, msgInfo)
-						editMsg.ParseMode = "Markdown"
-						bot.Send(editMsg)
-						lastThought = update.thought
-					}
-
-					// Handle Text response edits
-					if update.text != lastText && update.text != "" {
-						if textMsgID == 0 {
-							// First time we get text, send a new message
-							msg := tgbotapi.NewMessage(message.Chat.ID, update.text)
-							msg.ParseMode = "Markdown"
-							sent, err := bot.Send(msg)
-							if err == nil {
-								textMsgID = sent.MessageID
-							}
-						} else {
-							// Subsequent text updates, edit the second message
-							editMsg := tgbotapi.NewEditMessageText(message.Chat.ID, textMsgID, update.text)
-							editMsg.ParseMode = "Markdown"
-							bot.Send(editMsg)
-						}
-						lastText = update.text
-					}
-					lastEdit = time.Now()
-				} else {
-					timer.Reset(2 * time.Second)
-				}
-			case <-timer.C:
-			case <-doneChan:
-				// Ensure final states are pushed if pending
-				return
-			}
-		}
-	}()
+	editChan, doneChan := startUIUpdater(ctx, message.Chat.ID, sentMsg.MessageID)
 
 	var finalReply string
 	oldSessionID := userState.SessionID
@@ -414,15 +498,18 @@ func handleSessionsCommand(message *tgbotapi.Message) {
 
 	var sb strings.Builder
 	sb.WriteString("📋 *Recent Sessions:*\n\n")
-	for i, s := range sessions {
-		if i >= 15 { // Limit to top 15
+	count := 0
+	for i := len(sessions) - 1; i >= 0; i-- {
+		if count >= 15 { // Limit to 15 most recent
 			break
 		}
+		s := sessions[i]
 		description := s.Description
 		if len(description) > 50 {
 			description = description[:47] + "..."
 		}
-		sb.WriteString(fmt.Sprintf("%d. %s\n   _Time: %s_\n   ID: `/attach %s`\n\n", i+1, description, s.Time, s.ID))
+		sb.WriteString(fmt.Sprintf("%d. %s\n   _Time: %s_\n   ID: `/attach %s`\n\n", count+1, description, s.Time, s.ID))
+		count++
 	}
 
 	msg := tgbotapi.NewMessage(message.Chat.ID, sb.String())
@@ -588,64 +675,9 @@ func handleVoiceMessage(message *tgbotapi.Message) {
 		log.Printf("Error sending thinking message: %v", err)
 	}
 
-	// Start persistent typing indicator with the message ID
+	// Start typing indicator and UI updater
 	indicatorCtx, cancelIndicator := context.WithCancel(context.Background())
-	currentMsgID := sentMsg.MessageID
-	go typingIndicator(indicatorCtx, message.Chat.ID, &currentMsgID)
-
-	// Debounced UI updater for separate thoughts and text
-	type uiUpdate struct {
-		thought string
-		text    string
-	}
-	editChan := make(chan uiUpdate, 100)
-	doneChan := make(chan bool)
-	go func() {
-		var lastEdit time.Time
-		var lastThought string
-		var lastText string
-		thoughtMsgID := currentMsgID
-		var textMsgID int
-
-		timer := time.NewTimer(time.Hour)
-		timer.Stop()
-
-		for {
-			select {
-			case update := <-editChan:
-				if time.Since(lastEdit) > 2*time.Second {
-					if update.thought != lastThought && update.thought != "" {
-						msgInfo := "💭 *Thinking:*\n" + update.thought
-						editMsg := tgbotapi.NewEditMessageText(message.Chat.ID, thoughtMsgID, msgInfo)
-						editMsg.ParseMode = "Markdown"
-						bot.Send(editMsg)
-						lastThought = update.thought
-					}
-					if update.text != lastText && update.text != "" {
-						if textMsgID == 0 {
-							msg := tgbotapi.NewMessage(message.Chat.ID, update.text)
-							msg.ParseMode = "Markdown"
-							sent, err := bot.Send(msg)
-							if err == nil {
-								textMsgID = sent.MessageID
-							}
-						} else {
-							editMsg := tgbotapi.NewEditMessageText(message.Chat.ID, textMsgID, update.text)
-							editMsg.ParseMode = "Markdown"
-							bot.Send(editMsg)
-						}
-						lastText = update.text
-					}
-					lastEdit = time.Now()
-				} else {
-					timer.Reset(2 * time.Second)
-				}
-			case <-timer.C:
-			case <-doneChan:
-				return
-			}
-		}
-	}()
+	editChan, doneChan := startUIUpdater(indicatorCtx, message.Chat.ID, sentMsg.MessageID)
 
 	var finalReply string
 	oldSessionID := userState.SessionID
@@ -710,64 +742,9 @@ func handlePhotoMessage(message *tgbotapi.Message) {
 		log.Printf("Error sending thinking message: %v", err)
 	}
 
-	// Start persistent typing indicator
+	// Start typing indicator and UI updater
 	indicatorCtx, cancelIndicator := context.WithCancel(context.Background())
-	currentMsgID := sentMsg.MessageID
-	go typingIndicator(indicatorCtx, message.Chat.ID, &currentMsgID)
-
-	// Debounced UI updater for separate thoughts and text
-	type uiUpdate struct {
-		thought string
-		text    string
-	}
-	editChan := make(chan uiUpdate, 100)
-	doneChan := make(chan bool)
-	go func() {
-		var lastEdit time.Time
-		var lastThought string
-		var lastText string
-		thoughtMsgID := currentMsgID
-		var textMsgID int
-
-		timer := time.NewTimer(time.Hour)
-		timer.Stop()
-
-		for {
-			select {
-			case update := <-editChan:
-				if time.Since(lastEdit) > 2*time.Second {
-					if update.thought != lastThought && update.thought != "" {
-						msgInfo := "💭 *Thinking:*\n" + update.thought
-						editMsg := tgbotapi.NewEditMessageText(message.Chat.ID, thoughtMsgID, msgInfo)
-						editMsg.ParseMode = "Markdown"
-						bot.Send(editMsg)
-						lastThought = update.thought
-					}
-					if update.text != lastText && update.text != "" {
-						if textMsgID == 0 {
-							msg := tgbotapi.NewMessage(message.Chat.ID, update.text)
-							msg.ParseMode = "Markdown"
-							sent, err := bot.Send(msg)
-							if err == nil {
-								textMsgID = sent.MessageID
-							}
-						} else {
-							editMsg := tgbotapi.NewEditMessageText(message.Chat.ID, textMsgID, update.text)
-							editMsg.ParseMode = "Markdown"
-							bot.Send(editMsg)
-						}
-						lastText = update.text
-					}
-					lastEdit = time.Now()
-				} else {
-					timer.Reset(2 * time.Second)
-				}
-			case <-timer.C:
-			case <-doneChan:
-				return
-			}
-		}
-	}()
+	editChan, doneChan := startUIUpdater(indicatorCtx, message.Chat.ID, sentMsg.MessageID)
 
 	var finalReply string
 	oldSessionID := userState.SessionID
@@ -1084,3 +1061,14 @@ func transcribeVoice(fileID string) (string, error) {
 
 	return "", fmt.Errorf("no transcription received from API")
 }
+
+func spawnRestart(scriptPath string, repoDir string) {
+	cmd := exec.Command("/bin/bash", scriptPath, "restart")
+	cmd.Dir = repoDir
+	// Start the command but don't wait for it
+	err := cmd.Start()
+	if err != nil {
+		log.Printf("Error starting restart script: %v", err)
+	}
+}
+
