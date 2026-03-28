@@ -15,7 +15,7 @@
 - [D] **UI Consistency:** Add a prefix/header to the `Reply:` message in Telegram/WhatsApp (similar to the `💭 Thinking:` indicator) to clearly distinguish bot responses.
 
 ## Logging & Auditing
-- [ ] **Per-Session Logging:** Add a (Default) option to write all session text into individual log files.
+- [D] **Per-Session Logging:** Add a (Default) option to write all session text into individual log files.
     - *Path:* `logs/sessions/<session_id>.txt`
     - *Format:* `<date-time> : <message type> : <message text>`
     - *Example:* `2026-03-28: Thought: I am thinking about how to find a solution...`
