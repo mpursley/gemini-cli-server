@@ -336,6 +336,32 @@ func handleMessage(message *tgbotapi.Message) {
 		return
 	}
 
+	// Handle local shell commands
+	if strings.HasPrefix(text, "!run ") {
+		cmdStr := strings.TrimPrefix(text, "!run ")
+		msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("🏃 Running: `%s`", cmdStr))
+		msg.ParseMode = "Markdown"
+		bot.Send(msg)
+
+		out, err := exec.Command("bash", "-c", cmdStr).CombinedOutput()
+		reply := string(out)
+		if err != nil {
+			reply += fmt.Sprintf("\nError: %v", err)
+		}
+		if reply == "" {
+			reply = "Done (no output)"
+		}
+
+		if len(reply) > 4000 {
+			reply = reply[:4000] + "\n...[truncated]"
+		}
+
+		resMsg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("```\n%s\n```", reply))
+		resMsg.ParseMode = "Markdown"
+		bot.Send(resMsg)
+		return
+	}
+
 	// Handle Commands
 	if strings.HasPrefix(text, "/") {
 		parts := strings.Fields(text)
