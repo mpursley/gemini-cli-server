@@ -7,7 +7,7 @@
 - `[C]` Complete
 - [X] Deployed to Prod/Active version (v1.1.4)
 
-- [ ] Re: /status Add the session "name" to the /status output?
+- [X] Re: /status Add the session "name" to the /status output?
 
 - [X] when using /sessions I'd like to be able to add some text after to "grep" the session names for.. ( e.g. "/sessions fitness" -> only return sessions that include "fitness" in their name) (v1.1.4)
 
