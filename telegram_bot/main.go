@@ -336,6 +336,32 @@ func handleMessage(message *tgbotapi.Message) {
 		return
 	}
 
+	// Handle local shell commands
+	if strings.HasPrefix(text, "!run ") {
+		cmdStr := strings.TrimPrefix(text, "!run ")
+		msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("🏃 Running: `%s`", cmdStr))
+		msg.ParseMode = "Markdown"
+		bot.Send(msg)
+
+		out, err := exec.Command("bash", "-c", cmdStr).CombinedOutput()
+		reply := string(out)
+		if err != nil {
+			reply += fmt.Sprintf("\nError: %v", err)
+		}
+		if reply == "" {
+			reply = "Done (no output)"
+		}
+
+		if len(reply) > 4000 {
+			reply = reply[:4000] + "\n...[truncated]"
+		}
+
+		resMsg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("```\n%s\n```", reply))
+		resMsg.ParseMode = "Markdown"
+		bot.Send(resMsg)
+		return
+	}
+
 	// Handle Commands
 	if strings.HasPrefix(text, "/") {
 		parts := strings.Fields(text)
@@ -499,25 +525,41 @@ func handleSessionsCommand(message *tgbotapi.Message) {
 		return
 	}
 
-	var sb strings.Builder
-	sb.WriteString("📋 *Recent Sessions:*\n\n")
-	count := 0
-	for i := len(sessions) - 1; i >= 0; i-- {
-		if count >= 15 { // Limit to 15 most recent
-			break
-		}
-		s := sessions[i]
-		description := s.Description
-		if len(description) > 50 {
-			description = description[:47] + "..."
-		}
-		sb.WriteString(fmt.Sprintf("%d. %s\n   _Time: %s_\n   ID: `/attach %s`\n\n", count+1, description, s.Time, s.ID))
-		count++
+	startIdx := len(sessions) - 40
+	if startIdx < 0 {
+		startIdx = 0
 	}
 
-	msg := tgbotapi.NewMessage(message.Chat.ID, sb.String())
-	msg.ParseMode = "Markdown"
-	bot.Send(msg)
+	activeSessions := sessions[startIdx:]
+	
+	chunkSize := 15
+	for chunkStart := 0; chunkStart < len(activeSessions); chunkStart += chunkSize {
+		chunkEnd := chunkStart + chunkSize
+		if chunkEnd > len(activeSessions) {
+			chunkEnd = len(activeSessions)
+		}
+		
+		var sb strings.Builder
+		if chunkStart == 0 {
+			sb.WriteString(fmt.Sprintf("📋 *Recent Sessions (%d total):*\n\n", len(activeSessions)))
+		} else {
+			sb.WriteString("📋 *Recent Sessions (continued):*\n\n")
+		}
+		
+		for i := chunkStart; i < chunkEnd; i++ {
+			s := activeSessions[i]
+			description := s.Description
+			if len(description) > 50 {
+				description = description[:47] + "..."
+			}
+			displayNum := i + 1 
+			sb.WriteString(fmt.Sprintf("%d. %s\n   _Time: %s_\n   ID: `/attach %s`\n\n", displayNum, description, s.Time, s.ID))
+		}
+		
+		msg := tgbotapi.NewMessage(message.Chat.ID, sb.String())
+		msg.ParseMode = "Markdown"
+		bot.Send(msg)
+	}
 }
 
 func fetchSessions() ([]Session, error) {

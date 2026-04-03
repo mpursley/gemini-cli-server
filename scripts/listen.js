@@ -84,9 +84,71 @@ function runGemini(prompt, sessionId = null, imageData = null, mimeType = null, 
     "Connection": "keep-alive"
   });
 
+  let currentSessionId = sessionId;
+  let userPromptLogged = false;
+
+  const getLogPath = (sid) => {
+    const logsDir = path.join(__dirname, "..", "logs", "sessions");
+    if (!fs.existsSync(logsDir)) {
+      fs.mkdirSync(logsDir, { recursive: true });
+    }
+    return path.join(logsDir, `${sid}.txt`);
+  };
+
+  const getLogPrefix = () => {
+    const dateStr = new Date().toISOString().split('T')[0];
+    return `${dateStr} :`;
+  };
+
+  const logToFile = (sid, typeStr, textStr) => {
+    if (!textStr) return;
+    const line = `${getLogPrefix()} ${typeStr} : ${textStr.replace(/\n/g, ' ')}\n`;
+    fs.appendFileSync(getLogPath(sid), line);
+  };
+
   rl.on("line", (line) => {
     if (!line.trim()) return;
     res.write(line + "\n");
+    
+    try {
+      const parsed = JSON.parse(line);
+      
+      // Update session ID if it was newly created
+      if (parsed.type === "init" && parsed.sessionId) {
+        currentSessionId = parsed.sessionId;
+      }
+      
+      if (currentSessionId) {
+        // Log the user's prompt once we have a session ID
+        if (!userPromptLogged) {
+          logToFile(currentSessionId, "User", prompt);
+          userPromptLogged = true;
+        }
+        
+        let typeStr = "";
+        let textStr = "";
+        
+        if (parsed.type === "message" && parsed.role === "assistant") {
+           typeStr = "Assistant";
+           textStr = parsed.content;
+        } else if (parsed.type === "thought") {
+           typeStr = "Thought";
+           textStr = (parsed.subject ? `[${parsed.subject}] ` : "") + parsed.content;
+        } else if (parsed.type === "tool_use") {
+           typeStr = "Tool Use";
+           textStr = `Executing tool ${parsed.toolName}`;
+        } else if (parsed.type === "error") {
+           typeStr = "Error";
+           textStr = parsed.error || "Unknown error";
+        }
+        
+        if (typeStr) {
+           logToFile(currentSessionId, typeStr, textStr);
+        }
+      }
+    } catch (e) {
+      // Ignore JSON parse errors for incomplete or non-JSON lines
+    }
   });
 
   let errText = "";
