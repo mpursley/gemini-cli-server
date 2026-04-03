@@ -51,8 +51,10 @@ type CommandConfig struct {
 }
 
 type UserState struct {
-	State     string
-	SessionID string
+	State         string
+	SessionID     string
+	LastReply     string
+	CancelRequest context.CancelFunc
 }
 
 var (
@@ -337,8 +339,8 @@ func handleMessage(message *tgbotapi.Message) {
 	}
 
 	// Handle local shell commands
-	if strings.HasPrefix(text, "!run ") {
-		cmdStr := strings.TrimPrefix(text, "!run ")
+	if strings.HasPrefix(text, "/run ") {
+		cmdStr := strings.TrimPrefix(text, "/run ")
 		msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("🏃 Running: `%s`", cmdStr))
 		msg.ParseMode = "Markdown"
 		bot.Send(msg)
@@ -369,13 +371,33 @@ func handleMessage(message *tgbotapi.Message) {
 
 		switch command {
 		case "/start":
-			msg := tgbotapi.NewMessage(message.Chat.ID, "👋 Welcome! I'm your Gemini assistant. Send me a message or a voice note to get started.\n\nCommands:\n/sessions - List recent sessions\n/attach <id> - Attach to a session\n/save <name> - Save current session\n/new - Start a new session\n/restart - Restart the bot and server")
+			msg := tgbotapi.NewMessage(message.Chat.ID, "👋 Welcome! I'm your Gemini assistant. Send me a message or a voice note to get started.\n\nCommands:\n/sessions - List recent sessions\n/attach <id> - Attach to a session\n/save <name> - Save current session\n/new - Start a new session\n/restart - Restart the bot and server\n/stop - Stop the current response\n/repeat_last_reply - Repeat the last bot reply")
 			bot.Send(msg)
 			return
 		case "/new":
 			userState.SessionID = ""
 			msg := tgbotapi.NewMessage(message.Chat.ID, "🆕 Started a new session.")
 			bot.Send(msg)
+			return
+		case "/repeat_last_reply":
+			if userState.LastReply == "" {
+				msg := tgbotapi.NewMessage(message.Chat.ID, "❌ No previous reply found.")
+				bot.Send(msg)
+			} else {
+				msg := tgbotapi.NewMessage(message.Chat.ID, userState.LastReply)
+				msg.ParseMode = "Markdown"
+				bot.Send(msg)
+			}
+			return
+		case "/stop":
+			if userState.CancelRequest != nil {
+				userState.CancelRequest()
+				msg := tgbotapi.NewMessage(message.Chat.ID, "🛑 Stopping current request...")
+				bot.Send(msg)
+			} else {
+				msg := tgbotapi.NewMessage(message.Chat.ID, "❌ No active request to stop.")
+				bot.Send(msg)
+			}
 			return
 		case "/restart":
 			msg := tgbotapi.NewMessage(message.Chat.ID, "🔄 Restarting gemini-cli-server...")
@@ -398,10 +420,21 @@ func handleMessage(message *tgbotapi.Message) {
 			return
 		case "/status":
 			sessionID := "None"
+			sessionName := ""
 			if userState.SessionID != "" {
 				sessionID = fmt.Sprintf("`%s`", userState.SessionID)
+				
+				sessions, err := fetchSessions()
+				if err == nil {
+					for _, s := range sessions {
+						if s.ID == userState.SessionID {
+							sessionName = fmt.Sprintf("\n📝 Name: %s", s.Description)
+							break
+						}
+					}
+				}
 			}
-			msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("📊 *Bot Status*\n\n🔗 Session: %s\n🎤 Voice: Supported", sessionID))
+			msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("📊 *Bot Status*\n\n🔗 Session: %s%s\n🎤 Voice: Supported", sessionID, sessionName))
 			msg.ParseMode = "Markdown"
 			bot.Send(msg)
 			return
@@ -475,7 +508,13 @@ func handleMessage(message *tgbotapi.Message) {
 	var finalReply string
 	oldSessionID := userState.SessionID
 
-	newSessionID, modelName := callGemini(prompt, userState.SessionID, "", "", func(thought string, text string) {
+	if userState.CancelRequest != nil {
+		userState.CancelRequest()
+	}
+	reqCtx, cancelReq := context.WithCancel(context.Background())
+	userState.CancelRequest = cancelReq
+
+	newSessionID, modelName := callGemini(reqCtx, prompt, userState.SessionID, "", "", func(thought string, text string) {
 		if text != "" {
 			text = "🤖 *Reply:*\n" + text
 		}
@@ -485,6 +524,11 @@ func handleMessage(message *tgbotapi.Message) {
 
 	doneChan <- true
 	cancelIndicator()
+
+	userState.CancelRequest = nil
+	if finalReply != "" && finalReply != "Done." {
+		userState.LastReply = finalReply
+	}
 
 	if newSessionID != "" {
 		userState.SessionID = newSessionID
@@ -584,7 +628,7 @@ func fetchSessions() ([]Session, error) {
 	return sessResp.Sessions, nil
 }
 
-func callGemini(prompt string, sessionId string, imageData string, mimeType string, onChunk func(string, string)) (string, string) {
+func callGemini(ctx context.Context, prompt string, sessionId string, imageData string, mimeType string, onChunk func(string, string)) (string, string) {
 	payload := GeminiPayload{
 		Source:    "telegram",
 		Message:   prompt,
@@ -599,9 +643,18 @@ func callGemini(prompt string, sessionId string, imageData string, mimeType stri
 		return "❌ Error", ""
 	}
 
-	client := &http.Client{Timeout: 30 * time.Minute}
-	resp, err := client.Post(geminiURL, "application/json", bytes.NewBuffer(jsonData))
+	req, err := http.NewRequestWithContext(ctx, "POST", geminiURL, bytes.NewBuffer(jsonData))
 	if err != nil {
+		return "❌ Request creation error", ""
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 30 * time.Minute}
+	resp, err := client.Do(req)
+	if err != nil {
+		if ctx.Err() == context.Canceled {
+			return "🛑 Request canceled.", ""
+		}
 		return "❌ Request error", ""
 	}
 	defer resp.Body.Close()
@@ -726,7 +779,14 @@ func handleVoiceMessage(message *tgbotapi.Message) {
 
 	var finalReply string
 	oldSessionID := userState.SessionID
-	newSessionID, modelName := callGemini(prompt, userState.SessionID, "", "", func(thought string, text string) {
+
+	if userState.CancelRequest != nil {
+		userState.CancelRequest()
+	}
+	reqCtx, cancelReq := context.WithCancel(context.Background())
+	userState.CancelRequest = cancelReq
+
+	newSessionID, modelName := callGemini(reqCtx, prompt, userState.SessionID, "", "", func(thought string, text string) {
 		if text != "" {
 			text = "🤖 *Reply:*\n" + text
 		}
@@ -737,6 +797,11 @@ func handleVoiceMessage(message *tgbotapi.Message) {
 	doneChan <- true
 	
 	cancelIndicator()
+
+	userState.CancelRequest = nil
+	if finalReply != "" && finalReply != "Done." {
+		userState.LastReply = finalReply
+	}
 
 	if newSessionID != "" {
 		userState.SessionID = newSessionID
@@ -796,7 +861,14 @@ func handlePhotoMessage(message *tgbotapi.Message) {
 
 	var finalReply string
 	oldSessionID := userState.SessionID
-	newSessionID, modelName := callGemini(prompt, userState.SessionID, imageData, "image/jpeg", func(thought string, text string) {
+
+	if userState.CancelRequest != nil {
+		userState.CancelRequest()
+	}
+	reqCtx, cancelReq := context.WithCancel(context.Background())
+	userState.CancelRequest = cancelReq
+
+	newSessionID, modelName := callGemini(reqCtx, prompt, userState.SessionID, imageData, "image/jpeg", func(thought string, text string) {
 		if text != "" {
 			text = "🤖 *Reply:*\n" + text
 		}
@@ -807,6 +879,11 @@ func handlePhotoMessage(message *tgbotapi.Message) {
 	doneChan <- true
 	
 	cancelIndicator()
+
+	userState.CancelRequest = nil
+	if finalReply != "" && finalReply != "Done." {
+		userState.LastReply = finalReply
+	}
 
 	if newSessionID != "" {
 		userState.SessionID = newSessionID
