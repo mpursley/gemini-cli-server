@@ -1,11 +1,12 @@
 # TODO - gemini-cli-server
 
 ## Status Key
+- [ ] TODO
+- [I] In progress
+- [C] Complete
+- [X] Deployed to Prod/Active version
 
-- `[ ]` TODO
-- `[I]` In progress
-- `[C]` Complete
-- [X] Deployed to Prod/Active version (v1.1.4)
+## Tasks
 
 - [X] Re: /status Add the session "name" to the /status output?
 
