@@ -1,7 +1,6 @@
 # TODO - gemini-cli-server
 
 ## Status Key
-
 - [ ] TODO
 - [I] In progress
 - [C] Complete
