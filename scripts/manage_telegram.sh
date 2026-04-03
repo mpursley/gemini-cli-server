@@ -16,8 +16,10 @@ WA_BOT_LOG="$TMP_DIR/whatsapp-bot.log"
 LISTEN_PID_FILE="$TMP_DIR/gemini-listen.pid"
 LISTEN_LOG="$TMP_DIR/gemini-listen.log"
 LISTEN_SCRIPT="$REPO_DIR/scripts/listen.js"
+SESSION_LOGS_DIR="$REPO_DIR/logs/sessions"
 
 mkdir -p "$TMP_DIR"
+mkdir -p "$SESSION_LOGS_DIR"
 
 stop_all() {
     echo "🛑 Stopping services..."
@@ -67,7 +69,7 @@ stop_all() {
     echo "✅ All services stopped."
 }
 
-VERSION="v1.1.2"
+VERSION="v1.1.3"
 
 start_all() {
     echo "🚀 Starting gemini-cli-server $VERSION..."
@@ -175,7 +177,7 @@ case "$1" in
         status_all
         ;;
     logs)
-        tail -f "$LISTEN_LOG" "$BOT_LOG" 2>/dev/null
+        tail -f "$LISTEN_LOG" "$BOT_LOG" "$WA_BOT_LOG" "$SESSION_LOGS_DIR"/*.txt 2>/dev/null
         ;;
     *)
         echo "Usage: $0 {start|stop|restart|status|logs}"
