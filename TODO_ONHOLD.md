@@ -2,12 +2,12 @@
 
 ## Status Key
 
-- `[ ]` TODO
-- `[I]` In progress
-- `[C]` Complete
-- `[X]` Deployed to Prod/Active version
+- [ ] TODO
+- [I] In progress
+- [C] Complete
+- [X] Deployed to Prod/Active version
 
-- [ ] Re: /status Add the session "name" to the /status output?
+- [X] Re: /status Add the session "name" to the /status output?
 
 - [ ] when using /sessions I'd like to be able to add some text after to "grep" the session names for.. ( e.g. "/sessions fitness" -> only return sessions that include "fitness" in their name)
 
