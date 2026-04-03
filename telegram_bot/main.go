@@ -299,6 +299,11 @@ type Session struct {
 	Time        string `json:"time"`
 }
 
+type SessionWithIndex struct {
+	Session Session
+	Index   int
+}
+
 type SessionsResponse struct {
 	Ok       bool      `json:"ok"`
 	Sessions []Session `json:"sessions"`
@@ -439,7 +444,11 @@ func handleMessage(message *tgbotapi.Message) {
 			bot.Send(msg)
 			return
 		case "/sessions":
-			handleSessionsCommand(message)
+			filter := ""
+			if len(parts) > 1 {
+				filter = strings.Join(parts[1:], " ")
+			}
+			handleSessionsCommand(message, filter)
 			return
 		case "/attach":
 			if len(parts) < 2 {
@@ -555,7 +564,7 @@ func handleMessage(message *tgbotapi.Message) {
 	bot.Send(msg)
 }
 
-func handleSessionsCommand(message *tgbotapi.Message) {
+func handleSessionsCommand(message *tgbotapi.Message, filter string) {
 	sessions, err := fetchSessions()
 	if err != nil {
 		msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("❌ Error fetching sessions: %v", err))
@@ -569,43 +578,69 @@ func handleSessionsCommand(message *tgbotapi.Message) {
 		return
 	}
 
-	startIdx := len(sessions) - 40
-	if startIdx < 0 {
-		startIdx = 0
+	var activeSessions []SessionWithIndex
+	if filter != "" {
+		filterLower := strings.ToLower(filter)
+		for i, s := range sessions {
+			if strings.Contains(strings.ToLower(s.Description), filterLower) {
+				activeSessions = append(activeSessions, SessionWithIndex{Session: s, Index: i})
+			}
+		}
+	} else {
+		startIdx := len(sessions) - 40
+		if startIdx < 0 {
+			startIdx = 0
+		}
+		for i := startIdx; i < len(sessions); i++ {
+			activeSessions = append(activeSessions, SessionWithIndex{Session: sessions[i], Index: i})
+		}
 	}
 
-	activeSessions := sessions[startIdx:]
-	
+	if len(activeSessions) == 0 {
+		msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("📭 No sessions found matching: `%s`", filter))
+		msg.ParseMode = "Markdown"
+		bot.Send(msg)
+		return
+	}
+
 	chunkSize := 15
 	for chunkStart := 0; chunkStart < len(activeSessions); chunkStart += chunkSize {
 		chunkEnd := chunkStart + chunkSize
 		if chunkEnd > len(activeSessions) {
 			chunkEnd = len(activeSessions)
 		}
-		
+
 		var sb strings.Builder
-		if chunkStart == 0 {
-			sb.WriteString(fmt.Sprintf("📋 *Recent Sessions (%d total):*\n\n", len(activeSessions)))
-		} else {
-			sb.WriteString("📋 *Recent Sessions (continued):*\n\n")
+		header := "📋 *Recent Sessions (%d total):*\n"
+		if filter != "" {
+			header = "🔍 *Filtered Sessions (%d total):*\n"
 		}
-		
+		if chunkStart == 0 {
+			sb.WriteString(fmt.Sprintf(header, len(activeSessions)))
+			if filter != "" {
+				sb.WriteString(fmt.Sprintf("_Filtering for:_ `%s`\n\n", filter))
+			} else {
+				sb.WriteString("\n")
+			}
+		} else {
+			sb.WriteString("📋 *Sessions (continued):*\n\n")
+		}
+
 		for i := chunkStart; i < chunkEnd; i++ {
-			s := activeSessions[i]
-			description := s.Description
+			swi := activeSessions[i]
+			description := swi.Session.Description
 			if len(description) > 50 {
 				description = description[:47] + "..."
 			}
-			displayNum := i + 1 
-			sb.WriteString(fmt.Sprintf("%d. %s\n   _Time: %s_\n   ID: `/attach %s`\n\n", displayNum, description, s.Time, s.ID))
+			displayNum := swi.Index + 1
+			sb.WriteString(fmt.Sprintf("%d. %s\n   _Time: %s_\n   ID: `/attach %s`\n\n", displayNum, description, swi.Session.Time, swi.Session.ID))
 		}
-		
+
 		msg := tgbotapi.NewMessage(message.Chat.ID, sb.String())
 		msg.ParseMode = "Markdown"
 		bot.Send(msg)
 	}
 }
-
 func fetchSessions() ([]Session, error) {
 	// Update URL for sessions endpoint
 	sessionsURL := strings.Replace(geminiURL, "/event", "/sessions", 1)

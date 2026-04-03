@@ -5,11 +5,12 @@
 - `[ ]` TODO
 - `[I]` In progress
 - `[C]` Complete
-- `[X]` Deployed to Prod/Active version
+- [X] Deployed to Prod/Active version (v1.1.4)
 
 - [ ] Re: /status Add the session "name" to the /status output?
 
-- [ ] when using /sessions I'd like to be able to add some text after to "grep" the session names for.. ( e.g. "/sessions fitness" -> only return sessions that include "fitness" in their name)
+- [X] when using /sessions I'd like to be able to add some text after to "grep" the session names for.. ( e.g. "/sessions fitness" -> only return sessions that include "fitness" in their name) (v1.1.4)
+
 
 - [ ] Can we add an slash options to:
   - [ ] /repeat_last_reply ... To just repeat the last "reply" message... Sometimes ill loose connection during the thinking message and not get the reply message...
