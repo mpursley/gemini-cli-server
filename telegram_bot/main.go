@@ -375,8 +375,22 @@ func handleMessage(message *tgbotapi.Message) {
 		command := parts[0]
 
 		switch command {
-		case "/start":
-			msg := tgbotapi.NewMessage(message.Chat.ID, "👋 Welcome! I'm your Gemini assistant. Send me a message or a voice note to get started.\n\nCommands:\n/sessions - List recent sessions\n/attach <id> - Attach to a session\n/save <name> - Save current session\n/new - Start a new session\n/restart - Restart the bot and server\n/stop - Stop the current response\n/repeat_last_reply - Repeat the last bot reply")
+		case "/start", "/help":
+			helpText := `👋 Welcome! I'm your Gemini assistant. Send me a message or a voice note to get started.
+
+*Commands:*
+/help - Show this help message
+/sessions [filter] - List recent sessions, optionally filtered
+/attach <id> - Attach to a session
+/save <name> - Save current session with a name
+/new - Start a new session
+/status - Show bot status and current session
+/run <command> - Run a local shell command on the server
+/restart - Restart the bot and server
+/stop - Stop the current response
+/repeat_last_reply - Repeat the last bot reply`
+			msg := tgbotapi.NewMessage(message.Chat.ID, helpText)
+			msg.ParseMode = "Markdown"
 			bot.Send(msg)
 			return
 		case "/new":
