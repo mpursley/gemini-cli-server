@@ -40,7 +40,7 @@ stop_wa() {
     echo -e "${GREEN}✅ WhatsApp Bot stopped.${NC}"
 }
 
-VERSION="v1.1.3"
+VERSION="1.1.4"
 
 start_wa() {
     echo -e "${YELLOW}🚀 Starting gemini-cli-server (WhatsApp) $VERSION...${NC}"
@@ -48,7 +48,8 @@ start_wa() {
     # 1. Compile
     echo -e "  - Compiling WhatsApp bot..."
     cd "$WA_BOT_DIR" || exit
-    if ! go build -o whatsapp_bot_bin main.go >> "$WA_BOT_LOG" 2>&1; then
+    BUILD_TIME=$(date '+%Y-%m-%d %H:%M:%S')
+    if ! go build -ldflags "-X 'main.AppVersion=$VERSION' -X 'main.BuildTime=$BUILD_TIME'" -o whatsapp_bot_bin main.go >> "$WA_BOT_LOG" 2>&1; then
         echo -e "${RED}❌ Compilation failed! Check $WA_BOT_LOG${NC}"
         exit 1
     fi

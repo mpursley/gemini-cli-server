@@ -19,6 +19,11 @@ import (
 	"github.com/joho/godotenv"
 )
 
+var (
+	AppVersion = "dev"
+	BuildTime  = "unknown"
+)
+
 type GeminiPayload struct {
 	Source    string `json:"source"`
 	Message   string `json:"message"`
@@ -112,12 +117,16 @@ func main() {
 
 	// Register commands
 	commands := []tgbotapi.BotCommand{
+		{Command: "help", Description: "Show help message"},
 		{Command: "sessions", Description: "List recent sessions"},
 		{Command: "attach", Description: "Attach to a session (e.g. /attach ID)"},
 		{Command: "save", Description: "Save current session (e.g. /save name)"},
 		{Command: "new", Description: "Start a new session"},
 		{Command: "status", Description: "Show current session status"},
+		{Command: "run", Description: "Run a local shell command on the server"},
 		{Command: "restart", Description: "Restart the Telegram bot and server"},
+		{Command: "stop", Description: "Stop the current response"},
+		{Command: "repeat_last_reply", Description: "Repeat the last bot reply"},
 	}
 	config := tgbotapi.NewSetMyCommands(commands...)
 	if _, err := bot.Request(config); err != nil {
@@ -350,7 +359,9 @@ func handleMessage(message *tgbotapi.Message) {
 		msg.ParseMode = "Markdown"
 		bot.Send(msg)
 
-		out, err := exec.Command("bash", "-c", cmdStr).CombinedOutput()
+		cmd := exec.Command("bash", "-c", cmdStr)
+		cmd.Dir = os.Getenv("HOME") + "/dev"
+		out, err := cmd.CombinedOutput()
 		reply := string(out)
 		if err != nil {
 			reply += fmt.Sprintf("\nError: %v", err)
@@ -373,6 +384,9 @@ func handleMessage(message *tgbotapi.Message) {
 	if strings.HasPrefix(text, "/") {
 		parts := strings.Fields(text)
 		command := parts[0]
+		if idx := strings.Index(command, "@"); idx != -1 {
+			command = command[:idx]
+		}
 
 		switch command {
 		case "/start", "/help":
@@ -453,7 +467,7 @@ func handleMessage(message *tgbotapi.Message) {
 					}
 				}
 			}
-			msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("📊 *Bot Status*\n\n🔗 Session: %s%s\n🎤 Voice: Supported", sessionID, sessionName))
+			msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("📊 *Bot Status*\n\n🔗 Session: %s%s\n🎤 Voice: Supported\n📦 App: %s\n🕒 Built: %s", sessionID, sessionName, AppVersion, BuildTime))
 			msg.ParseMode = "Markdown"
 			bot.Send(msg)
 			return

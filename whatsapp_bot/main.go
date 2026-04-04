@@ -25,6 +25,11 @@ import (
 	"github.com/joho/godotenv"
 )
 
+var (
+	AppVersion = "dev"
+	BuildTime  = "unknown"
+)
+
 type GeminiPayload struct {
 	Source    string `json:"source"`
 	Message   string `json:"message"`
@@ -242,6 +247,9 @@ func handler(rawEvt interface{}) {
 			if strings.HasPrefix(text, "/") {
 				parts := strings.Fields(text)
 				cmd := parts[0]
+				if idx := strings.Index(cmd, "@"); idx != -1 {
+					cmd = cmd[:idx]
+				}
 				switch cmd {
 				case "/start", "/help":
 					helpText := `👋 Welcome! I'm your Gemini assistant. Send me a message or a photo to get started.
@@ -263,7 +271,7 @@ func handler(rawEvt interface{}) {
 					if sessionID != "" {
 						sID = sessionID
 					}
-					statusMsg := fmt.Sprintf("📊 *WhatsApp Bot Status*\n\n🔗 Session: %s", sID)
+					statusMsg := fmt.Sprintf("📊 *WhatsApp Bot Status*\n\n🔗 Session: %s\n📦 App: %s\n🕒 Built: %s", sID, AppVersion, BuildTime)
 					client.SendMessage(context.Background(), evt.Info.Chat, &waE2E.Message{Conversation: &statusMsg})
 					return
 				case "/sessions":
