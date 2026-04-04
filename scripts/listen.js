@@ -223,6 +223,20 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  if (req.method === "DELETE" && req.url.startsWith("/sessions/")) {
+    const id = req.url.split("/").pop();
+    deleteSession(id)
+      .then(() => {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
+      })
+      .catch(e => {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: String(e.message || e) }));
+      });
+    return;
+  }
+
   if (req.method === "POST" && req.url.startsWith("/event")) {
     let raw = "";
     req.on("data", c => (raw += c));
@@ -272,3 +286,4 @@ server.listen(port, () => {
 
 process.on("SIGINT", cleanup);
 process.on("SIGTERM", cleanup);
+
