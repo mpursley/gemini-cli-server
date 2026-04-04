@@ -5,7 +5,7 @@
 - `[ ]` TODO
 - `[I]` In progress
 - `[C]` Complete
-- `[X]` Deployed to Prod/Active version
+- [X] Deployed to Prod/Active version (v1.1.4)
 
 ## Sessions & Persistence
 
@@ -21,8 +21,7 @@
   - _Format:_ `<date-time> : <message type> : <message text>`
   - _Example:_ `2026-03-28: Thought: I am thinking about how to find a solution...`
 
+- [X] **Sessions Filter:** Added filtering to the `/sessions` command to allow searching for sessions by description.
+  - _Usage:_ `/sessions <filter_text>`
+
 - [X] **Implement `/run` command:** Added an option to run commands on the cli/bash without sending them to gemini-cli. e.g. "/run ls -la". The output is sent in a code block.
-
-## Future Ideas
-
-- [ ] (Add more ideas here...)

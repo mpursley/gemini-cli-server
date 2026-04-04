@@ -243,6 +243,17 @@ func handler(rawEvt interface{}) {
 				parts := strings.Fields(text)
 				cmd := parts[0]
 				switch cmd {
+				case "/start", "/help":
+					helpText := `👋 Welcome! I'm your Gemini assistant. Send me a message or a photo to get started.
+
+*Commands:*
+/help - Show this help message
+/sessions - List recent sessions
+/attach <id> - Attach to a session
+/new - Start a new session
+/status - Show bot status and current session`
+					client.SendMessage(context.Background(), evt.Info.Chat, &waE2E.Message{Conversation: &helpText})
+					return
 				case "/new":
 					userSessions[jid] = ""
 					client.SendMessage(context.Background(), evt.Info.Chat, &waE2E.Message{Conversation: strPtr("🆕 Started a new session.")})
