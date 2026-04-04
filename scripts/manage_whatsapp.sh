@@ -40,7 +40,7 @@ stop_wa() {
     echo -e "${GREEN}✅ WhatsApp Bot stopped.${NC}"
 }
 
-VERSION="1.1.4"
+VERSION="1.1.5"
 
 start_wa() {
     echo -e "${YELLOW}🚀 Starting gemini-cli-server (WhatsApp) $VERSION...${NC}"
