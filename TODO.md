@@ -5,12 +5,14 @@
 - `[ ]` TODO
 - `[I]` In progress
 - `[C]` Complete
-- [X] Deployed to Prod/Active version (v1.1.4)
+- [X] Deployed to Prod/Active version (v1.1.6)
 
 ## Sessions & Persistence
 
 - [X] **Implement `/save` command:** Enable the ability to save the current session with a custom name.
   - [X] Note: This requires updates to the `gemini-cli` repository to support a native save/rename function via the API/CLI Some changes were added to support this feature.. we need to test it out
+
+- [X] **Implement `/delete` command:** Added the ability to delete a session via the bot.
 
 - [X] **UI Consistency:** Add a prefix/header to the `Reply:` message in Telegram/WhatsApp (similar to the `💭 Thinking:` indicator) to clearly distinguish bot responses.
 

@@ -204,6 +204,32 @@ function listSessions() {
   });
 }
 
+function deleteSession(id) {
+  return new Promise((resolve, reject) => {
+    console.log(`[${new Date().toISOString()}] Deleting session: ${id}`);
+    let cliCommand = "gemini";
+    let cliArgs = ["--delete-session", id];
+    const localDevBundle = process.env.HOME + "/dev/gemini-cli/bundle/gemini.js";
+    if (fs.existsSync(localDevBundle)) {
+      cliCommand = "node";
+      cliArgs = [localDevBundle, "--delete-session", id];
+    }
+
+    const p = spawn(cliCommand, cliArgs, { stdio: ["ignore", "pipe", "pipe"] });
+    let out = "", err = "";
+    p.stdout.on("data", d => (out += d.toString()));
+    p.stderr.on("data", d => (err += d.toString()));
+    p.on("close", code => {
+      if (code === 0 || code === null) {
+        resolve();
+      } else {
+        console.error(`[${new Date().toISOString()}] Error deleting session: ${err}`);
+        reject(new Error(err || `exit ${code}`));
+      }
+    });
+  });
+}
+
 const server = http.createServer((req, res) => {
   if (req.method === "GET" && req.url === "/health") {
     res.writeHead(200, { "Content-Type": "text/plain" });

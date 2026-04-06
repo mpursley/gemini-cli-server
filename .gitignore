@@ -8,7 +8,11 @@ screenshots/
 
 # Go binaries
 telegram_bot/telegram_bot
+telegram_bot/telegram_bot_bin
+telegram_bot/telegram-gemini-bot
 whatsapp_bot/whatsapp_bot
+whatsapp_bot/whatsapp_bot_bin
+whatsapp_bot/whatsapp-gemini-bot
 bin/
 obj/
 *.exe
@@ -16,3 +20,5 @@ obj/
 *.out
 vendor/
 logs/
+*.pid
+*.log

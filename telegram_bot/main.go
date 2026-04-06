@@ -115,11 +115,26 @@ func main() {
 	log.Printf("Gemini endpoint: %s", geminiURL)
 	log.Printf("Target chat ID: %d", targetChatID)
 
+	// Check if recovering from a restart
+	restartChatIDFile := os.Getenv("HOME") + "/dev/gemini-cli-server/.restart_chat_id"
+	if b, err := os.ReadFile(restartChatIDFile); err == nil {
+		if id, err := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64); err == nil {
+			msg := tgbotapi.NewMessage(id, "✅ Server and bot have successfully restarted!")
+			bot.Send(msg)
+		}
+		os.Remove(restartChatIDFile)
+	} else if targetChatID != 0 {
+		// Send startup notification to target chat if configured
+		msg := tgbotapi.NewMessage(targetChatID, "🚀 gemini-cli-server and bot have successfully started up!")
+		bot.Send(msg)
+	}
+
 	// Register commands
 	commands := []tgbotapi.BotCommand{
 		{Command: "help", Description: "Show help message"},
 		{Command: "sessions", Description: "List recent sessions"},
 		{Command: "attach", Description: "Attach to a session (e.g. /attach ID)"},
+		{Command: "delete", Description: "Delete a session (e.g. /delete ID)"},
 		{Command: "save", Description: "Save current session (e.g. /save name)"},
 		{Command: "new", Description: "Start a new session"},
 		{Command: "status", Description: "Show current session status"},
@@ -396,6 +411,7 @@ func handleMessage(message *tgbotapi.Message) {
 /help - Show this help message
 /sessions [filter] - List recent sessions, optionally filtered
 /attach <id> - Attach to a session
+/delete <id> - Delete a session
 /save <name> - Save current session with a name
 /new - Start a new session
 /status - Show bot status and current session
@@ -435,6 +451,9 @@ func handleMessage(message *tgbotapi.Message) {
 		case "/restart":
 			msg := tgbotapi.NewMessage(message.Chat.ID, "🔄 Restarting gemini-cli-server...")
 			bot.Send(msg)
+			
+			// Save chat ID to file for startup notification
+			os.WriteFile(os.Getenv("HOME")+"/dev/gemini-cli-server/.restart_chat_id", []byte(fmt.Sprintf("%d", message.Chat.ID)), 0644)
 			
 			// Get the absolute path to the manage script
 			repoDir := os.Getenv("HOME") + "/dev/gemini-cli-server"
@@ -487,6 +506,30 @@ func handleMessage(message *tgbotapi.Message) {
 			}
 			userState.SessionID = parts[1]
 			msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("🔗 Attached to session: `%s`", userState.SessionID))
+			msg.ParseMode = "Markdown"
+			bot.Send(msg)
+			return
+		case "/delete":
+			if len(parts) < 2 {
+				msg := tgbotapi.NewMessage(message.Chat.ID, "❌ Please provide a session ID or index. Example: `/delete 8a3d000a...`")
+				msg.ParseMode = "Markdown"
+				bot.Send(msg)
+				return
+			}
+			
+			err := deleteSession(parts[1])
+			if err != nil {
+				msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("❌ Error deleting session: %v", err))
+				bot.Send(msg)
+				return
+			}
+
+			// If deleting current session, clear it
+			if userState.SessionID == parts[1] {
+				userState.SessionID = ""
+			}
+
+			msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("✅ Deleted session: `%s`", parts[1]))
 			msg.ParseMode = "Markdown"
 			bot.Send(msg)
 			return
@@ -661,7 +704,7 @@ func handleSessionsCommand(message *tgbotapi.Message, filter string) {
 				description = description[:47] + "..."
 			}
 			displayNum := swi.Index + 1
-			sb.WriteString(fmt.Sprintf("%d. %s\n   _Time: %s_\n   ID: `/attach %s`\n\n", displayNum, description, swi.Session.Time, swi.Session.ID))
+			sb.WriteString(fmt.Sprintf("%d. %s\n   _Time: %s_\n   ID: `/attach %s` | `/delete %s`\n\n", displayNum, description, swi.Session.Time, swi.Session.ID, swi.Session.ID))
 		}
 
 		msg := tgbotapi.NewMessage(message.Chat.ID, sb.String())
@@ -685,10 +728,31 @@ func fetchSessions() ([]Session, error) {
 	}
 
 	if !sessResp.Ok {
-		return nil, fmt.Errorf(sessResp.Error)
+		return nil, fmt.Errorf("API error: %s", sessResp.Error)
 	}
 
 	return sessResp.Sessions, nil
+}
+
+func deleteSession(id string) error {
+	sessionsURL := strings.Replace(geminiURL, "/event", "/sessions/"+id, 1)
+
+	req, err := http.NewRequest("DELETE", sessionsURL, nil)
+	if err != nil {
+		return err
+	}
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to delete session, status: %d", resp.StatusCode)
+	}
+	return nil
 }
 
 func callGemini(ctx context.Context, prompt string, sessionId string, imageData string, mimeType string, onChunk func(string, string)) (string, string) {
