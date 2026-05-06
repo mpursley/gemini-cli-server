@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"strconv"
@@ -25,12 +26,13 @@ var (
 )
 
 type GeminiPayload struct {
-	Source    string `json:"source"`
-	Message   string `json:"message"`
-	SessionID string `json:"sessionId,omitempty"`
-	ImageData string `json:"imageData,omitempty"`
-	MimeType  string `json:"mimeType,omitempty"`
-	ApiKey    string `json:"apiKey,omitempty"`
+	Source     string `json:"source"`
+	Message    string `json:"message"`
+	SessionID  string `json:"sessionId,omitempty"`
+	WorkingDir string `json:"workingDir,omitempty"`
+	ImageData  string `json:"imageData,omitempty"`
+	MimeType   string `json:"mimeType,omitempty"`
+	ApiKey     string `json:"apiKey,omitempty"`
 }
 
 type StreamChunk struct {
@@ -58,8 +60,16 @@ type CommandConfig struct {
 type UserState struct {
 	State         string
 	SessionID     string
+	WorkingDir    string
 	LastReply     string
 	CancelRequest context.CancelFunc
+}
+
+func getWorkingDir(u *UserState) string {
+	if u != nil && u.WorkingDir != "" {
+		return u.WorkingDir
+	}
+	return os.Getenv("HOME") + "/dev"
 }
 
 var (
@@ -138,6 +148,7 @@ func main() {
 		{Command: "save", Description: "Save current session (e.g. /save name)"},
 		{Command: "new", Description: "Start a new session"},
 		{Command: "status", Description: "Show current session status"},
+		{Command: "cd", Description: "Change working directory"},
 		{Command: "run", Description: "Run a local shell command on the server"},
 		{Command: "restart", Description: "Restart the Telegram bot and server"},
 		{Command: "stop", Description: "Stop the current response"},
@@ -375,7 +386,7 @@ func handleMessage(message *tgbotapi.Message) {
 		bot.Send(msg)
 
 		cmd := exec.Command("bash", "-c", cmdStr)
-		cmd.Dir = os.Getenv("HOME") + "/dev"
+		cmd.Dir = getWorkingDir(userState)
 		out, err := cmd.CombinedOutput()
 		reply := string(out)
 		if err != nil {
@@ -415,6 +426,7 @@ func handleMessage(message *tgbotapi.Message) {
 /save <name> - Save current session with a name
 /new - Start a new session
 /status - Show bot status and current session
+/cd <path> - Change working directory
 /run <command> - Run a local shell command on the server
 /restart - Restart the bot and server
 /stop - Stop the current response
@@ -476,7 +488,7 @@ func handleMessage(message *tgbotapi.Message) {
 			if userState.SessionID != "" {
 				sessionID = fmt.Sprintf("`%s`", userState.SessionID)
 				
-				sessions, err := fetchSessions()
+				sessions, err := fetchSessions(getWorkingDir(userState))
 				if err == nil {
 					for _, s := range sessions {
 						if s.ID == userState.SessionID {
@@ -517,7 +529,7 @@ func handleMessage(message *tgbotapi.Message) {
 				return
 			}
 			
-			err := deleteSession(parts[1])
+			err := deleteSession(parts[1], getWorkingDir(userState))
 			if err != nil {
 				msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("❌ Error deleting session: %v", err))
 				bot.Send(msg)
@@ -548,6 +560,19 @@ func handleMessage(message *tgbotapi.Message) {
 			}
 			// Transform to the native CLI command and let it fall through to be sent to the backend
 			text = "/resume save " + strings.Join(parts[1:], " ")
+		case "/cd":
+			if len(parts) < 2 {
+				msg := tgbotapi.NewMessage(message.Chat.ID, "❌ Please provide a path. Example: `/cd /path/to/dir`")
+				msg.ParseMode = "Markdown"
+				bot.Send(msg)
+				return
+			}
+			path := strings.Join(parts[1:], " ")
+			userState.WorkingDir = path
+			msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("📂 Changed directory to: `%s`", path))
+			msg.ParseMode = "Markdown"
+			bot.Send(msg)
+			return
 		default:
 			// Let unknown commands fall through as regular text if needed, or return
 			// But since we fall through on /save, we just let the switch finish.
@@ -594,7 +619,7 @@ func handleMessage(message *tgbotapi.Message) {
 	reqCtx, cancelReq := context.WithCancel(context.Background())
 	userState.CancelRequest = cancelReq
 
-	newSessionID, modelName := callGemini(reqCtx, prompt, userState.SessionID, "", "", func(thought string, text string) {
+	newSessionID, modelName := callGemini(reqCtx, prompt, userState.SessionID, getWorkingDir(userState), "", "", func(thought string, text string) {
 		if text != "" {
 			text = "🤖 *Reply:*\n" + text
 		}
@@ -636,7 +661,8 @@ func handleMessage(message *tgbotapi.Message) {
 }
 
 func handleSessionsCommand(message *tgbotapi.Message, filter string) {
-	sessions, err := fetchSessions()
+	userState := getUserState(message.From.ID)
+	sessions, err := fetchSessions(getWorkingDir(userState))
 	if err != nil {
 		msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("❌ Error fetching sessions: %v", err))
 		bot.Send(msg)
@@ -712,9 +738,12 @@ func handleSessionsCommand(message *tgbotapi.Message, filter string) {
 		bot.Send(msg)
 	}
 }
-func fetchSessions() ([]Session, error) {
+func fetchSessions(workingDir string) ([]Session, error) {
 	// Update URL for sessions endpoint
 	sessionsURL := strings.Replace(geminiURL, "/event", "/sessions", 1)
+	if workingDir != "" {
+		sessionsURL += "?dir=" + url.QueryEscape(workingDir)
+	}
 	
 	resp, err := http.Get(sessionsURL)
 	if err != nil {
@@ -734,8 +763,11 @@ func fetchSessions() ([]Session, error) {
 	return sessResp.Sessions, nil
 }
 
-func deleteSession(id string) error {
+func deleteSession(id string, workingDir string) error {
 	sessionsURL := strings.Replace(geminiURL, "/event", "/sessions/"+id, 1)
+	if workingDir != "" {
+		sessionsURL += "?dir=" + url.QueryEscape(workingDir)
+	}
 
 	req, err := http.NewRequest("DELETE", sessionsURL, nil)
 	if err != nil {
@@ -755,14 +787,15 @@ func deleteSession(id string) error {
 	return nil
 }
 
-func callGemini(ctx context.Context, prompt string, sessionId string, imageData string, mimeType string, onChunk func(string, string)) (string, string) {
+func callGemini(ctx context.Context, prompt string, sessionId string, workingDir string, imageData string, mimeType string, onChunk func(string, string)) (string, string) {
 	payload := GeminiPayload{
-		Source:    "telegram",
-		Message:   prompt,
-		SessionID: sessionId,
-		ImageData: imageData,
-		MimeType:  mimeType,
-		ApiKey:    geminiAPIKey,
+		Source:     "telegram",
+		Message:    prompt,
+		SessionID:  sessionId,
+		WorkingDir: workingDir,
+		ImageData:  imageData,
+		MimeType:   mimeType,
+		ApiKey:     geminiAPIKey,
 	}
 
 	jsonData, err := json.Marshal(payload)
@@ -913,7 +946,7 @@ func handleVoiceMessage(message *tgbotapi.Message) {
 	reqCtx, cancelReq := context.WithCancel(context.Background())
 	userState.CancelRequest = cancelReq
 
-	newSessionID, modelName := callGemini(reqCtx, prompt, userState.SessionID, "", "", func(thought string, text string) {
+	newSessionID, modelName := callGemini(reqCtx, prompt, userState.SessionID, getWorkingDir(userState), "", "", func(thought string, text string) {
 		if text != "" {
 			text = "🤖 *Reply:*\n" + text
 		}
@@ -995,7 +1028,7 @@ func handlePhotoMessage(message *tgbotapi.Message) {
 	reqCtx, cancelReq := context.WithCancel(context.Background())
 	userState.CancelRequest = cancelReq
 
-	newSessionID, modelName := callGemini(reqCtx, prompt, userState.SessionID, imageData, "image/jpeg", func(thought string, text string) {
+	newSessionID, modelName := callGemini(reqCtx, prompt, userState.SessionID, getWorkingDir(userState), imageData, "image/jpeg", func(thought string, text string) {
 		if text != "" {
 			text = "🤖 *Reply:*\n" + text
 		}

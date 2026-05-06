@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 const http = require("http");
+const url = require("url");
 const fs = require("fs");
 const path = require("path");
 const { spawn, spawnSync } = require("child_process");
@@ -8,7 +9,7 @@ const port = Number(process.argv[2] || process.env.PORT || 8765);
 
 
 
-function runGemini(prompt, sessionId = null, imageData = null, mimeType = null, apiKey = null, res) {
+function runGemini(prompt, sessionId = null, workingDir = null, imageData = null, mimeType = null, apiKey = null, res) {
   let tempFile = null;
   let args = ["--yolo", "-m", "gemini-3.1-pro-preview", "--output-format", "stream-json"];
   
@@ -31,7 +32,7 @@ function runGemini(prompt, sessionId = null, imageData = null, mimeType = null, 
         cliArgs = [localDevBundle, ...args];
       }
       
-      const p = spawnSync(cliCommand, cliArgs, { env: envVars, encoding: "utf8" });
+      const p = spawnSync(cliCommand, cliArgs, { env: envVars, encoding: "utf8", cwd: workingDir || process.cwd() });
       res.writeHead(200, { "Content-Type": "application/x-ndjson" });
       if (p.status === 0) {
         res.write(JSON.stringify({ type: "message", role: "assistant", content: `✅ Session saved as: ${sessionName}` }) + "\n");
@@ -74,7 +75,7 @@ function runGemini(prompt, sessionId = null, imageData = null, mimeType = null, 
     cliArgs = [localDevBundle, ...args];
   }
 
-  const p = spawn(cliCommand, cliArgs, { stdio: ["ignore", "pipe", "pipe"], env: envVars });
+  const p = spawn(cliCommand, cliArgs, { stdio: ["ignore", "pipe", "pipe"], env: envVars, cwd: workingDir || process.cwd() });
   const readline = require("readline");
   const rl = readline.createInterface({ input: p.stdout });
   
@@ -161,9 +162,10 @@ function runGemini(prompt, sessionId = null, imageData = null, mimeType = null, 
   });
 }
 
-function listSessions() {
+function listSessions(workingDir) {
+  const cwd = workingDir || process.cwd();
   return new Promise((resolve, reject) => {
-    console.log(`[${new Date().toISOString()}] Listing sessions...`);
+    console.log(`[${new Date().toISOString()}] Listing sessions in ${cwd}...`);
     let cliCommand = "gemini";
     let cliArgs = ["--list-sessions"];
     const localDevBundle = process.env.HOME + "/dev/gemini-cli/bundle/gemini.js";
@@ -172,7 +174,7 @@ function listSessions() {
       cliArgs = [localDevBundle, "--list-sessions"];
     }
 
-    const p = spawn(cliCommand, cliArgs, { stdio: ["ignore", "pipe", "pipe"] });
+    const p = spawn(cliCommand, cliArgs, { stdio: ["ignore", "pipe", "pipe"], cwd });
     let out = "", err = "";
     p.stdout.on("data", d => (out += d.toString()));
     p.stderr.on("data", d => (err += d.toString()));
@@ -231,13 +233,16 @@ function deleteSession(id) {
 }
 
 const server = http.createServer((req, res) => {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
   if (req.method === "GET" && req.url === "/health") {
     res.writeHead(200, { "Content-Type": "text/plain" });
     return res.end("ok");
   }
 
-  if (req.method === "GET" && req.url === "/sessions") {
-    listSessions()
+  if (req.method === "GET" && req.url.startsWith("/sessions")) {
+    const parsedUrl = url.parse(req.url, true);
+    const dir = parsedUrl.query.dir;
+    listSessions(dir)
       .then(sessions => {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true, sessions }));
@@ -277,6 +282,7 @@ const server = http.createServer((req, res) => {
       const source = parsed.source || "unknown";
       const message = parsed.message || "";
       const sessionId = parsed.sessionId || null;
+      const workingDir = parsed.workingDir || null;
       const imageData = parsed.imageData || null;
       const mimeType = parsed.mimeType || null;
       const apiKey = parsed.apiKey || null;
@@ -286,7 +292,7 @@ const server = http.createServer((req, res) => {
         return res.end(JSON.stringify({ ok: false, error: "No message or image provided" }));
       }
 
-      runGemini(message, sessionId, imageData, mimeType, apiKey, res);
+      runGemini(message, sessionId, workingDir, imageData, mimeType, apiKey, res);
     });
     return;
   }
@@ -300,9 +306,25 @@ server.timeout = 1800000; // 30 minutes
 server.headersTimeout = 1800000; // 30 minutes
 server.requestTimeout = 1800000; // 30 minutes
 
-function cleanup() {
-  server.close(() => process.exit(0));
-  setTimeout(() => process.exit(0), 1500).unref();
+process.on("uncaughtException", (err) => {
+  console.error(`[${new Date().toISOString()}] Uncaught Exception: ${err}`);
+  console.error(err.stack);
+});
+
+process.on("unhandledRejection", (reason, promise) => {
+  console.error(`[${new Date().toISOString()}] Unhandled Rejection at: ${promise}, reason: ${reason}`);
+});
+
+function cleanup(sig) {
+  console.log(`[${new Date().toISOString()}] Received ${sig}. Cleaning up...`);
+  server.close(() => {
+    console.log(`[${new Date().toISOString()}] Server closed. Exiting.`);
+    process.exit(0);
+  });
+  setTimeout(() => {
+    console.log(`[${new Date().toISOString()}] Cleanup timeout. Forcing exit.`);
+    process.exit(0);
+  }, 1500).unref();
 }
 
 server.listen(port, () => {
@@ -310,6 +332,9 @@ server.listen(port, () => {
   console.log(`Gemini CLI working directory: ${process.cwd()}`);
 });
 
-process.on("SIGINT", cleanup);
-process.on("SIGTERM", cleanup);
+process.on("SIGINT", () => cleanup("SIGINT"));
+process.on("SIGTERM", () => cleanup("SIGTERM"));
+
+
+
 

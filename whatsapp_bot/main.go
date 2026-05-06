@@ -31,12 +31,13 @@ var (
 )
 
 type GeminiPayload struct {
-	Source    string `json:"source"`
-	Message   string `json:"message"`
-	SessionID string `json:"sessionId,omitempty"`
-	ImageData string `json:"imageData,omitempty"`
-	MimeType  string `json:"mimeType,omitempty"`
-	ApiKey    string `json:"apiKey,omitempty"`
+	Source     string `json:"source"`
+	Message    string `json:"message"`
+	SessionID  string `json:"sessionId,omitempty"`
+	WorkingDir string `json:"workingDir,omitempty"`
+	ImageData  string `json:"imageData,omitempty"`
+	MimeType   string `json:"mimeType,omitempty"`
+	ApiKey     string `json:"apiKey,omitempty"`
 }
 
 type StreamChunk struct {
@@ -62,8 +63,28 @@ var (
 	geminiURL    string
 	targetJID    string
 	geminiAPIKey string
-	userSessions = make(map[string]string) // Map JID to SessionID
+	userStates   = make(map[string]*UserState)
 )
+
+type UserState struct {
+	SessionID  string
+	WorkingDir string
+}
+
+func getWorkingDir(u *UserState) string {
+	if u != nil && u.WorkingDir != "" {
+		return u.WorkingDir
+	}
+	return os.Getenv("HOME") + "/dev"
+}
+
+func getUserState(jid string) *UserState {
+	if state, exists := userStates[jid]; exists {
+		return state
+	}
+	userStates[jid] = &UserState{}
+	return userStates[jid]
+}
 
 func strPtr(s string) *string {
 	return &s
@@ -283,7 +304,7 @@ func handler(rawEvt interface{}) {
 						client.SendMessage(context.Background(), evt.Info.Chat, &waE2E.Message{Conversation: &msg})
 						return
 					}
-					userSessions[jid] = parts[1]
+					userState.SessionID = parts[1]
 					msg := fmt.Sprintf("🔗 Attached to session: %s", parts[1])
 					client.SendMessage(context.Background(), evt.Info.Chat, &waE2E.Message{Conversation: &msg})
 					return
@@ -437,8 +458,11 @@ func handleSessionsCommand(evt *events.Message) {
 	client.SendMessage(context.Background(), evt.Info.Chat, &waE2E.Message{Conversation: &reply})
 }
 
-func fetchSessions() ([]Session, error) {
+func fetchSessions(workingDir string) ([]Session, error) {
 	sessionsURL := strings.Replace(geminiURL, "/event", "/sessions", 1)
+	if workingDir != "" {
+		sessionsURL += "?dir=" + url.QueryEscape(workingDir)
+	}
 	resp, err := http.Get(sessionsURL)
 	if err != nil {
 		return nil, err
@@ -455,14 +479,15 @@ func fetchSessions() ([]Session, error) {
 	return sessResp.Sessions, nil
 }
 
-func callGemini(prompt string, sessionId string, imageData string, mimeType string, onChunk func(string, string)) (string, string) {
+func callGemini(prompt string, sessionId string, workingDir string, imageData string, mimeType string, onChunk func(string, string)) (string, string) {
 	payload := GeminiPayload{
-		Source:    "whatsapp",
-		Message:   prompt,
-		SessionID: sessionId,
-		ImageData: imageData,
-		MimeType:  mimeType,
-		ApiKey:    geminiAPIKey,
+		Source:     "whatsapp",
+		Message:    prompt,
+		SessionID:  sessionId,
+		WorkingDir: workingDir,
+		ImageData:  imageData,
+		MimeType:   mimeType,
+		ApiKey:     geminiAPIKey,
 	}
 
 	jsonData, err := json.Marshal(payload)

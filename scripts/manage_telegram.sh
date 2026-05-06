@@ -69,7 +69,7 @@ stop_all() {
     echo "✅ All services stopped."
 }
 
-VERSION="1.1.6"
+VERSION="1.1.7"
 
 start_all() {
     echo "🚀 Starting gemini-cli-server $VERSION..."
@@ -83,10 +83,8 @@ start_all() {
     fi
 
     # 1. Start listener
-    echo "  - Starting listener in ~/dev..."
-    cd "$HOME/dev" || cd "$REPO_DIR"
+    echo "  - Starting listener..."
     nohup node "$LISTEN_SCRIPT" 8765 >> "$LISTEN_LOG" 2>&1 &
-    cd "$REPO_DIR"
     echo $! > "$LISTEN_PID_FILE"
     sleep 2 # Give it a moment to bind to port
     
