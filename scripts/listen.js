@@ -13,13 +13,18 @@ function runGemini(prompt, sessionId = null, workingDir = null, imageData = null
   let tempFile = null;
   let args = ["--yolo", "-m", "gemini-3.1-pro-preview", "--output-format", "stream-json"];
   
+  let cwd = workingDir || process.cwd();
+  if (cwd && !path.isAbsolute(cwd)) {
+    cwd = path.resolve(process.cwd(), cwd);
+  }
+
   // Special handling for /resume save <name>
   const resumeSaveMatch = prompt.match(/\/resume save (.+)/);
   if (resumeSaveMatch) {
     const sessionName = resumeSaveMatch[1].trim();
     if (sessionName && sessionId) {
       args = ["--resume", sessionId, "--save-session", sessionName];
-      console.log(`[${new Date().toISOString()}] Saving session ${sessionId} as "${sessionName}"`);
+      console.log(`[${new Date().toISOString()}] Saving session ${sessionId} as "${sessionName}" in ${cwd}`);
       
       const envVars = Object.assign({}, process.env);
       if (apiKey) envVars.GEMINI_API_KEY = apiKey;
@@ -28,11 +33,11 @@ function runGemini(prompt, sessionId = null, workingDir = null, imageData = null
       let cliArgs = args;
       const localDevBundle = process.env.HOME + "/dev/gemini-cli/bundle/gemini.js";
       if (fs.existsSync(localDevBundle)) {
-        cliCommand = "node";
+        cliCommand = process.execPath;
         cliArgs = [localDevBundle, ...args];
       }
       
-      const p = spawnSync(cliCommand, cliArgs, { env: envVars, encoding: "utf8", cwd: workingDir || process.cwd() });
+      const p = spawnSync(cliCommand, cliArgs, { env: envVars, encoding: "utf8", cwd });
       res.writeHead(200, { "Content-Type": "application/x-ndjson" });
       if (p.status === 0) {
         res.write(JSON.stringify({ type: "message", role: "assistant", content: `✅ Session saved as: ${sessionName}` }) + "\n");
@@ -58,7 +63,7 @@ function runGemini(prompt, sessionId = null, workingDir = null, imageData = null
   }
   
   args.push("--prompt", finalPrompt);
-  console.log(`[${new Date().toISOString()}] Executing Gemini Streaming (Session: ${sessionId || "new"})${tempFile ? ` with image` : ""}`);
+  console.log(`[${new Date().toISOString()}] Executing Gemini Streaming (Session: ${sessionId || "new"})${tempFile ? ` with image` : ""} in ${cwd}`);
   
   const envVars = Object.assign({}, process.env);
   if (apiKey) {
@@ -71,11 +76,11 @@ function runGemini(prompt, sessionId = null, workingDir = null, imageData = null
   // Prefer the explicitly patched local repository if it exists
   const localDevBundle = process.env.HOME + "/dev/gemini-cli/bundle/gemini.js";
   if (fs.existsSync(localDevBundle)) {
-    cliCommand = "node";
+    cliCommand = process.execPath;
     cliArgs = [localDevBundle, ...args];
   }
 
-  const p = spawn(cliCommand, cliArgs, { stdio: ["ignore", "pipe", "pipe"], env: envVars, cwd: workingDir || process.cwd() });
+  const p = spawn(cliCommand, cliArgs, { stdio: ["ignore", "pipe", "pipe"], env: envVars, cwd });
   const readline = require("readline");
   const rl = readline.createInterface({ input: p.stdout });
   
@@ -163,14 +168,18 @@ function runGemini(prompt, sessionId = null, workingDir = null, imageData = null
 }
 
 function listSessions(workingDir) {
-  const cwd = workingDir || process.cwd();
+  let cwd = workingDir || process.cwd();
+  if (cwd && !path.isAbsolute(cwd)) {
+    cwd = path.resolve(process.cwd(), cwd);
+  }
+
   return new Promise((resolve, reject) => {
     console.log(`[${new Date().toISOString()}] Listing sessions in ${cwd}...`);
     let cliCommand = "gemini";
     let cliArgs = ["--list-sessions"];
     const localDevBundle = process.env.HOME + "/dev/gemini-cli/bundle/gemini.js";
     if (fs.existsSync(localDevBundle)) {
-      cliCommand = "node";
+      cliCommand = process.execPath;
       cliArgs = [localDevBundle, "--list-sessions"];
     }
 
@@ -206,18 +215,23 @@ function listSessions(workingDir) {
   });
 }
 
-function deleteSession(id) {
+function deleteSession(id, workingDir) {
+  let cwd = workingDir || process.cwd();
+  if (cwd && !path.isAbsolute(cwd)) {
+    cwd = path.resolve(process.cwd(), cwd);
+  }
+
   return new Promise((resolve, reject) => {
-    console.log(`[${new Date().toISOString()}] Deleting session: ${id}`);
+    console.log(`[${new Date().toISOString()}] Deleting session: ${id} in ${cwd}`);
     let cliCommand = "gemini";
     let cliArgs = ["--delete-session", id];
     const localDevBundle = process.env.HOME + "/dev/gemini-cli/bundle/gemini.js";
     if (fs.existsSync(localDevBundle)) {
-      cliCommand = "node";
+      cliCommand = process.execPath;
       cliArgs = [localDevBundle, "--delete-session", id];
     }
 
-    const p = spawn(cliCommand, cliArgs, { stdio: ["ignore", "pipe", "pipe"] });
+    const p = spawn(cliCommand, cliArgs, { stdio: ["ignore", "pipe", "pipe"], cwd });
     let out = "", err = "";
     p.stdout.on("data", d => (out += d.toString()));
     p.stderr.on("data", d => (err += d.toString()));
@@ -255,8 +269,12 @@ const server = http.createServer((req, res) => {
   }
 
   if (req.method === "DELETE" && req.url.startsWith("/sessions/")) {
-    const id = req.url.split("/").pop();
-    deleteSession(id)
+    const parsedUrl = url.parse(req.url, true);
+    const parts = parsedUrl.pathname.split("/");
+    const id = parts.pop();
+    const dir = parsedUrl.query.dir;
+    
+    deleteSession(id, dir)
       .then(() => {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true }));

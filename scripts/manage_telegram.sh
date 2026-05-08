@@ -69,7 +69,7 @@ stop_all() {
     echo "✅ All services stopped."
 }
 
-VERSION="1.1.7"
+VERSION="1.1.8"
 
 start_all() {
     echo "🚀 Starting gemini-cli-server $VERSION..."

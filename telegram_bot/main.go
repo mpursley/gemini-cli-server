@@ -498,7 +498,8 @@ func handleMessage(message *tgbotapi.Message) {
 					}
 				}
 			}
-			msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("📊 *Bot Status*\n\n🔗 Session: %s%s\n🎤 Voice: Supported\n📦 App: %s\n🕒 Built: %s", sessionID, sessionName, AppVersion, BuildTime))
+			pwd := getWorkingDir(userState)
+			msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("📊 *Bot Status*\n\n🔗 Session: %s%s\n📁 PWD: `%s`\n🎤 Voice: Supported\n📦 App: %s\n🕒 Built: %s", sessionID, sessionName, pwd, AppVersion, BuildTime))
 			msg.ParseMode = "Markdown"
 			bot.Send(msg)
 			return

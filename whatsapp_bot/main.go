@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -236,7 +237,8 @@ func handler(rawEvt interface{}) {
 			}
 
 			jid := sender
-			sessionID := userSessions[jid]
+			userState := getUserState(jid)
+			sessionID := userState.SessionID
 
 			// 1. Handle Images
 			var imageData, mimeType string
@@ -284,7 +286,7 @@ func handler(rawEvt interface{}) {
 					client.SendMessage(context.Background(), evt.Info.Chat, &waE2E.Message{Conversation: &helpText})
 					return
 				case "/new":
-					userSessions[jid] = ""
+					userState.SessionID = ""
 					client.SendMessage(context.Background(), evt.Info.Chat, &waE2E.Message{Conversation: strPtr("🆕 Started a new session.")})
 					return
 				case "/status":
@@ -292,11 +294,12 @@ func handler(rawEvt interface{}) {
 					if sessionID != "" {
 						sID = sessionID
 					}
-					statusMsg := fmt.Sprintf("📊 *WhatsApp Bot Status*\n\n🔗 Session: %s\n📦 App: %s\n🕒 Built: %s", sID, AppVersion, BuildTime)
+					pwd := getWorkingDir(userState)
+					statusMsg := fmt.Sprintf("📊 *WhatsApp Bot Status*\n\n🔗 Session: %s\n📁 PWD: `%s`\n📦 App: %s\n🕒 Built: %s", sID, pwd, AppVersion, BuildTime)
 					client.SendMessage(context.Background(), evt.Info.Chat, &waE2E.Message{Conversation: &statusMsg})
 					return
 				case "/sessions":
-					handleSessionsCommand(evt)
+					handleSessionsCommand(evt, userState)
 					return
 				case "/attach":
 					if len(parts) < 2 {
@@ -391,7 +394,7 @@ func handler(rawEvt interface{}) {
 			}()
 
 			var finalReply string
-			newSessionID, modelName := callGemini(prompt, sessionID, imageData, mimeType, func(thought string, text string) {
+			newSessionID, modelName := callGemini(prompt, sessionID, getWorkingDir(userState), imageData, mimeType, func(thought string, text string) {
 				if text != "" {
 					text = "🤖 *Reply:*\n" + text
 				}
@@ -405,7 +408,7 @@ func handler(rawEvt interface{}) {
 			cancelIndicator()
 			
 			if newSessionID != "" {
-				userSessions[jid] = newSessionID
+				userState.SessionID = newSessionID
 			}
 
 			if sessionID == "" && newSessionID != "" {
@@ -427,8 +430,8 @@ func handler(rawEvt interface{}) {
 	}
 }
 
-func handleSessionsCommand(evt *events.Message) {
-	sessions, err := fetchSessions()
+func handleSessionsCommand(evt *events.Message, userState *UserState) {
+	sessions, err := fetchSessions(getWorkingDir(userState))
 	if err != nil {
 		msg := fmt.Sprintf("❌ Error fetching sessions: %v", err)
 		client.SendMessage(context.Background(), evt.Info.Chat, &waE2E.Message{Conversation: &msg})
