@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -26,13 +27,14 @@ var (
 )
 
 type GeminiPayload struct {
-	Source     string `json:"source"`
-	Message    string `json:"message"`
-	SessionID  string `json:"sessionId,omitempty"`
-	WorkingDir string `json:"workingDir,omitempty"`
-	ImageData  string `json:"imageData,omitempty"`
-	MimeType   string `json:"mimeType,omitempty"`
-	ApiKey     string `json:"apiKey,omitempty"`
+	Source     string   `json:"source"`
+	Message    string   `json:"message"`
+	SessionID  string   `json:"sessionId,omitempty"`
+	WorkingDir string   `json:"workingDir,omitempty"`
+	ImageData  string   `json:"imageData,omitempty"`
+	ImageDatas []string `json:"imageDatas,omitempty"`
+	MimeType   string   `json:"mimeType,omitempty"`
+	ApiKey     string   `json:"apiKey,omitempty"`
 }
 
 type StreamChunk struct {
@@ -58,11 +60,25 @@ type CommandConfig struct {
 }
 
 type UserState struct {
-	State         string
-	SessionID     string
-	WorkingDir    string
-	LastReply     string
-	CancelRequest context.CancelFunc
+	State         string             `json:"state"`
+	SessionID     string             `json:"sessionId"`
+	WorkingDir    string             `json:"workingDir"`
+	LastReply     string             `json:"lastReply"`
+	CancelRequest context.CancelFunc `json:"-"`
+}
+
+func saveUserStates() {
+	data, err := json.Marshal(userStates)
+	if err == nil {
+		os.WriteFile("tmp/user_states.json", data, 0644)
+	}
+}
+
+func loadUserStates() {
+	data, err := os.ReadFile("tmp/user_states.json")
+	if err == nil {
+		json.Unmarshal(data, &userStates)
+	}
 }
 
 func getWorkingDir(u *UserState) string {
@@ -73,12 +89,14 @@ func getWorkingDir(u *UserState) string {
 }
 
 var (
-	bot          *tgbotapi.BotAPI
-	geminiURL    string
-	geminiAPIKey string
-	targetChatID int64
-	userStates   = make(map[int64]*UserState)
-	envFilePath  = ".env"
+	bot             *tgbotapi.BotAPI
+	geminiURL       string
+	geminiAPIKey    string
+	targetChatID    int64
+	userStates      = make(map[int64]*UserState)
+	envFilePath     = ".env"
+	mediaGroupCache = make(map[string][]*tgbotapi.Message)
+	mediaGroupMutex sync.Mutex
 )
 
 const (
@@ -96,6 +114,14 @@ func main() {
 	if token == "" {
 		log.Fatal("TELEGRAM_BOT_TOKEN environment variable is required")
 	}
+
+	loadUserStates()
+	go func() {
+		for {
+			time.Sleep(5 * time.Second)
+			saveUserStates()
+		}
+	}()
 
 	geminiURL = os.Getenv("GEMINI_ENDPOINT")
 	if geminiURL == "" {
@@ -346,6 +372,53 @@ type SessionsResponse struct {
 }
 
 func handleMessage(message *tgbotapi.Message) {
+	if message.From == nil || message.From.IsBot {
+		return
+	}
+
+	if message.MediaGroupID != "" {
+		mediaGroupMutex.Lock()
+		msgs := mediaGroupCache[message.MediaGroupID]
+		mediaGroupCache[message.MediaGroupID] = append(msgs, message)
+		isFirst := len(msgs) == 0
+		mediaGroupMutex.Unlock()
+
+		if isFirst {
+			go func() {
+				// Wait a short time to collect all parts of the album
+				time.Sleep(1500 * time.Millisecond)
+
+				mediaGroupMutex.Lock()
+				group := mediaGroupCache[message.MediaGroupID]
+				delete(mediaGroupCache, message.MediaGroupID)
+				mediaGroupMutex.Unlock()
+
+				if len(group) > 0 {
+					if group[0].Photo != nil && len(group[0].Photo) > 0 {
+						handlePhotoMessageGroup(group)
+					} else {
+						var bestMsg *tgbotapi.Message
+						for _, m := range group {
+							if m.Caption != "" || m.Text != "" {
+								bestMsg = m
+								break
+							}
+						}
+						if bestMsg == nil {
+							bestMsg = group[0]
+						}
+						handleMessageInner(bestMsg)
+					}
+				}
+			}()
+		}
+		return
+	}
+
+	handleMessageInner(message)
+}
+
+func handleMessageInner(message *tgbotapi.Message) {
 	if message.From.IsBot {
 		return
 	}
@@ -369,7 +442,7 @@ func handleMessage(message *tgbotapi.Message) {
 
 	// Handle photo messages
 	if message.Photo != nil && len(message.Photo) > 0 {
-		handlePhotoMessage(message)
+		handlePhotoMessageGroup([]*tgbotapi.Message{message})
 		return
 	}
 
@@ -620,7 +693,7 @@ func handleMessage(message *tgbotapi.Message) {
 	reqCtx, cancelReq := context.WithCancel(context.Background())
 	userState.CancelRequest = cancelReq
 
-	newSessionID, modelName := callGemini(reqCtx, prompt, userState.SessionID, getWorkingDir(userState), "", "", func(thought string, text string) {
+	newSessionID, modelName := callGemini(reqCtx, prompt, userState.SessionID, getWorkingDir(userState), nil, "", func(thought string, text string) {
 		if text != "" {
 			text = "🤖 *Reply:*\n" + text
 		}
@@ -788,13 +861,13 @@ func deleteSession(id string, workingDir string) error {
 	return nil
 }
 
-func callGemini(ctx context.Context, prompt string, sessionId string, workingDir string, imageData string, mimeType string, onChunk func(string, string)) (string, string) {
+func callGemini(ctx context.Context, prompt string, sessionId string, workingDir string, imageDatas []string, mimeType string, onChunk func(string, string)) (string, string) {
 	payload := GeminiPayload{
 		Source:     "telegram",
 		Message:    prompt,
 		SessionID:  sessionId,
 		WorkingDir: workingDir,
-		ImageData:  imageData,
+		ImageDatas: imageDatas,
 		MimeType:   mimeType,
 		ApiKey:     geminiAPIKey,
 	}
@@ -947,7 +1020,7 @@ func handleVoiceMessage(message *tgbotapi.Message) {
 	reqCtx, cancelReq := context.WithCancel(context.Background())
 	userState.CancelRequest = cancelReq
 
-	newSessionID, modelName := callGemini(reqCtx, prompt, userState.SessionID, getWorkingDir(userState), "", "", func(thought string, text string) {
+	newSessionID, modelName := callGemini(reqCtx, prompt, userState.SessionID, getWorkingDir(userState), nil, "", func(thought string, text string) {
 		if text != "" {
 			text = "🤖 *Reply:*\n" + text
 		}
@@ -987,29 +1060,62 @@ func handleVoiceMessage(message *tgbotapi.Message) {
 	bot.Send(msg)
 }
 
-func handlePhotoMessage(message *tgbotapi.Message) {
-	// Get the largest photo
-	photo := message.Photo[len(message.Photo)-1]
-	
-	imageData, err := downloadFileAsBase64(photo.FileID)
-	if err != nil {
-		msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("❌ Error downloading photo: %v", err))
-		bot.Send(msg)
+func handlePhotoMessageGroup(messages []*tgbotapi.Message) {
+	if len(messages) == 0 {
 		return
 	}
 
-	prompt := message.Caption
-	if prompt == "" {
-		prompt = "What is in this image?"
+	var imageDatas []string
+	var prompt string
+	var chatID int64
+	var fromID int64
+	var fromUserName string
+	var replyToMsgID int
+
+	for _, msg := range messages {
+		if msg.Photo == nil || len(msg.Photo) == 0 {
+			continue
+		}
+		
+		chatID = msg.Chat.ID
+		fromID = msg.From.ID
+		fromUserName = msg.From.UserName
+		if msg.ReplyToMessage != nil {
+			replyToMsgID = msg.MessageID
+		}
+		
+		if msg.Caption != "" {
+			prompt = msg.Caption
+		}
+
+		photo := msg.Photo[len(msg.Photo)-1]
+		imageData, err := downloadFileAsBase64(photo.FileID)
+		if err == nil {
+			imageDatas = append(imageDatas, imageData)
+		} else {
+			log.Printf("Error downloading photo %s: %v", photo.FileID, err)
+		}
 	}
 
-	userState := getUserState(message.From.ID)
-	log.Printf("Processing photo from %s (Current Session: %s): %s", message.From.UserName, userState.SessionID, prompt)
+	if len(imageDatas) == 0 {
+		bot.Send(tgbotapi.NewMessage(chatID, "❌ Error downloading photos from album."))
+		return
+	}
+
+	if prompt == "" {
+		prompt = "What is in this image?"
+		if len(imageDatas) > 1 {
+			prompt = "What is in these images?"
+		}
+	}
+
+	userState := getUserState(fromID)
+	log.Printf("Processing %d photo(s) from %s (Current Session: %s): %s", len(imageDatas), fromUserName, userState.SessionID, prompt)
 
 	// Send initial thinking message
-	thinkingMsg := tgbotapi.NewMessage(message.Chat.ID, "Thinking...")
-	if message.ReplyToMessage != nil {
-		thinkingMsg.ReplyToMessageID = message.MessageID
+	thinkingMsg := tgbotapi.NewMessage(chatID, "Thinking...")
+	if replyToMsgID != 0 {
+		thinkingMsg.ReplyToMessageID = replyToMsgID
 	}
 	sentMsg, err := bot.Send(thinkingMsg)
 	if err != nil {
@@ -1018,7 +1124,7 @@ func handlePhotoMessage(message *tgbotapi.Message) {
 
 	// Start typing indicator and UI updater
 	indicatorCtx, cancelIndicator := context.WithCancel(context.Background())
-	editChan, doneChan := startUIUpdater(indicatorCtx, message.Chat.ID, sentMsg.MessageID)
+	editChan, doneChan := startUIUpdater(indicatorCtx, chatID, sentMsg.MessageID)
 
 	var finalReply string
 	oldSessionID := userState.SessionID
@@ -1029,7 +1135,7 @@ func handlePhotoMessage(message *tgbotapi.Message) {
 	reqCtx, cancelReq := context.WithCancel(context.Background())
 	userState.CancelRequest = cancelReq
 
-	newSessionID, modelName := callGemini(reqCtx, prompt, userState.SessionID, getWorkingDir(userState), imageData, "image/jpeg", func(thought string, text string) {
+	newSessionID, modelName := callGemini(reqCtx, prompt, userState.SessionID, getWorkingDir(userState), imageDatas, "image/jpeg", func(thought string, text string) {
 		if text != "" {
 			text = "🤖 *Reply:*\n" + text
 		}
@@ -1064,7 +1170,7 @@ func handlePhotoMessage(message *tgbotapi.Message) {
 	}
 
 	msgInfo := finalReply
-	msg := tgbotapi.NewMessage(message.Chat.ID, msgInfo)
+	msg := tgbotapi.NewMessage(chatID, msgInfo)
 	msg.ParseMode = "Markdown"
 	bot.Send(msg)
 }

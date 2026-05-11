@@ -9,7 +9,7 @@ const port = Number(process.argv[2] || process.env.PORT || 8765);
 
 
 
-function runGemini(prompt, sessionId = null, workingDir = null, imageData = null, mimeType = null, apiKey = null, res) {
+function runGemini(prompt, sessionId = null, workingDir = null, imageData = null, mimeType = null, apiKey = null, res, imageDatas = null) {
   let tempFile = null;
   let args = ["--yolo", "-m", "gemini-3.1-pro-preview", "--output-format", "stream-json"];
   
@@ -54,16 +54,23 @@ function runGemini(prompt, sessionId = null, workingDir = null, imageData = null
   }
   
   let finalPrompt = prompt;
-  if (imageData) {
+  let hasImage = false;
+  let imagesCount = 0;
+  
+  const imagesToProcess = imageDatas && imageDatas.length > 0 ? imageDatas : (imageData ? [imageData] : []);
+  
+  for (let i = 0; i < imagesToProcess.length; i++) {
     const ext = mimeType === "image/png" ? "png" : "jpg";
-    const fileName = `upload-${Date.now()}.${ext}`;
+    const fileName = `upload-${Date.now()}-${i}.${ext}`;
     tempFile = path.join(__dirname, "..", "uploads", fileName);
-    fs.writeFileSync(tempFile, Buffer.from(imageData, "base64"));
-    finalPrompt = `${prompt} ${tempFile}`;
+    fs.writeFileSync(tempFile, Buffer.from(imagesToProcess[i], "base64"));
+    finalPrompt = `${finalPrompt} ${tempFile}`;
+    hasImage = true;
+    imagesCount++;
   }
   
   args.push("--prompt", finalPrompt);
-  console.log(`[${new Date().toISOString()}] Executing Gemini Streaming (Session: ${sessionId || "new"})${tempFile ? ` with image` : ""} in ${cwd}`);
+  console.log(`[${new Date().toISOString()}] Executing Gemini Streaming (Session: ${sessionId || "new"})${hasImage ? ` with ${imagesCount} image(s)` : ""} in ${cwd}`);
   
   const envVars = Object.assign({}, process.env);
   if (apiKey) {
@@ -81,6 +88,14 @@ function runGemini(prompt, sessionId = null, workingDir = null, imageData = null
   }
 
   const p = spawn(cliCommand, cliArgs, { stdio: ["ignore", "pipe", "pipe"], env: envVars, cwd });
+
+  res.on("close", () => {
+    if (p && !p.killed && p.exitCode === null) {
+      console.log(`[${new Date().toISOString()}] Client disconnected, killing process...`);
+      p.kill("SIGKILL");
+    }
+  });
+
   const readline = require("readline");
   const rl = readline.createInterface({ input: p.stdout });
   
@@ -302,15 +317,16 @@ const server = http.createServer((req, res) => {
       const sessionId = parsed.sessionId || null;
       const workingDir = parsed.workingDir || null;
       const imageData = parsed.imageData || null;
+      const imageDatas = parsed.imageDatas || null;
       const mimeType = parsed.mimeType || null;
       const apiKey = parsed.apiKey || null;
 
-      if (!message && !imageData) {
+      if (!message && !imageData && (!imageDatas || imageDatas.length === 0)) {
         res.writeHead(400, { "Content-Type": "application/json" });
         return res.end(JSON.stringify({ ok: false, error: "No message or image provided" }));
       }
 
-      runGemini(message, sessionId, workingDir, imageData, mimeType, apiKey, res);
+      runGemini(message, sessionId, workingDir, imageData, mimeType, apiKey, res, imageDatas);
     });
     return;
   }
