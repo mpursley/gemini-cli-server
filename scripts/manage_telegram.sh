@@ -69,7 +69,7 @@ stop_all() {
     echo "✅ All services stopped."
 }
 
-VERSION="v1.1.4"
+VERSION="1.1.9"
 
 start_all() {
     echo "🚀 Starting gemini-cli-server $VERSION..."
@@ -97,7 +97,8 @@ start_all() {
     # 2. Start Telegram bot
     echo "  - Compiling Telegram bot..."
     cd "$BOT_DIR"
-    if go build -o telegram_bot_bin main.go >> "$BOT_LOG" 2>&1; then
+    BUILD_TIME=$(date '+%Y-%m-%d %H:%M:%S')
+    if go build -ldflags "-X 'main.AppVersion=$VERSION' -X 'main.BuildTime=$BUILD_TIME'" -o telegram_bot_bin main.go >> "$BOT_LOG" 2>&1; then
         echo "  - Telegram Bot compiled successfully."
     else
         echo "  - ❌ Telegram Bot compilation failed! Check $BOT_LOG"
@@ -117,7 +118,8 @@ start_all() {
     if [ "$START_WA" = "true" ]; then
         echo "  - Compiling WhatsApp bot..."
         cd "$WA_BOT_DIR"
-        if go build -o whatsapp_bot_bin main.go >> "$WA_BOT_LOG" 2>&1; then
+        BUILD_TIME=$(date '+%Y-%m-%d %H:%M:%S')
+        if go build -ldflags "-X 'main.AppVersion=$VERSION' -X 'main.BuildTime=$BUILD_TIME'" -o whatsapp_bot_bin main.go >> "$WA_BOT_LOG" 2>&1; then
             echo "  - WhatsApp Bot compiled successfully."
         else
             echo "  - ❌ WhatsApp Bot compilation failed! Check $WA_BOT_LOG"

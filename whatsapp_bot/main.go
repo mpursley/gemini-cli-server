@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -25,13 +26,19 @@ import (
 	"github.com/joho/godotenv"
 )
 
+var (
+	AppVersion = "dev"
+	BuildTime  = "unknown"
+)
+
 type GeminiPayload struct {
-	Source    string `json:"source"`
-	Message   string `json:"message"`
-	SessionID string `json:"sessionId,omitempty"`
-	ImageData string `json:"imageData,omitempty"`
-	MimeType  string `json:"mimeType,omitempty"`
-	ApiKey    string `json:"apiKey,omitempty"`
+	Source     string `json:"source"`
+	Message    string `json:"message"`
+	SessionID  string `json:"sessionId,omitempty"`
+	WorkingDir string `json:"workingDir,omitempty"`
+	ImageData  string `json:"imageData,omitempty"`
+	MimeType   string `json:"mimeType,omitempty"`
+	ApiKey     string `json:"apiKey,omitempty"`
 }
 
 type StreamChunk struct {
@@ -57,8 +64,28 @@ var (
 	geminiURL    string
 	targetJID    string
 	geminiAPIKey string
-	userSessions = make(map[string]string) // Map JID to SessionID
+	userStates   = make(map[string]*UserState)
 )
+
+type UserState struct {
+	SessionID  string
+	WorkingDir string
+}
+
+func getWorkingDir(u *UserState) string {
+	if u != nil && u.WorkingDir != "" {
+		return u.WorkingDir
+	}
+	return os.Getenv("HOME") + "/dev"
+}
+
+func getUserState(jid string) *UserState {
+	if state, exists := userStates[jid]; exists {
+		return state
+	}
+	userStates[jid] = &UserState{}
+	return userStates[jid]
+}
 
 func strPtr(s string) *string {
 	return &s
@@ -210,7 +237,8 @@ func handler(rawEvt interface{}) {
 			}
 
 			jid := sender
-			sessionID := userSessions[jid]
+			userState := getUserState(jid)
+			sessionID := userState.SessionID
 
 			// 1. Handle Images
 			var imageData, mimeType string
@@ -242,6 +270,9 @@ func handler(rawEvt interface{}) {
 			if strings.HasPrefix(text, "/") {
 				parts := strings.Fields(text)
 				cmd := parts[0]
+				if idx := strings.Index(cmd, "@"); idx != -1 {
+					cmd = cmd[:idx]
+				}
 				switch cmd {
 				case "/start", "/help":
 					helpText := `👋 Welcome! I'm your Gemini assistant. Send me a message or a photo to get started.
@@ -255,7 +286,7 @@ func handler(rawEvt interface{}) {
 					client.SendMessage(context.Background(), evt.Info.Chat, &waE2E.Message{Conversation: &helpText})
 					return
 				case "/new":
-					userSessions[jid] = ""
+					userState.SessionID = ""
 					client.SendMessage(context.Background(), evt.Info.Chat, &waE2E.Message{Conversation: strPtr("🆕 Started a new session.")})
 					return
 				case "/status":
@@ -263,11 +294,12 @@ func handler(rawEvt interface{}) {
 					if sessionID != "" {
 						sID = sessionID
 					}
-					statusMsg := fmt.Sprintf("📊 *WhatsApp Bot Status*\n\n🔗 Session: %s", sID)
+					pwd := getWorkingDir(userState)
+					statusMsg := fmt.Sprintf("📊 *WhatsApp Bot Status*\n\n🔗 Session: %s\n📁 PWD: `%s`\n📦 App: %s\n🕒 Built: %s", sID, pwd, AppVersion, BuildTime)
 					client.SendMessage(context.Background(), evt.Info.Chat, &waE2E.Message{Conversation: &statusMsg})
 					return
 				case "/sessions":
-					handleSessionsCommand(evt)
+					handleSessionsCommand(evt, userState)
 					return
 				case "/attach":
 					if len(parts) < 2 {
@@ -275,7 +307,7 @@ func handler(rawEvt interface{}) {
 						client.SendMessage(context.Background(), evt.Info.Chat, &waE2E.Message{Conversation: &msg})
 						return
 					}
-					userSessions[jid] = parts[1]
+					userState.SessionID = parts[1]
 					msg := fmt.Sprintf("🔗 Attached to session: %s", parts[1])
 					client.SendMessage(context.Background(), evt.Info.Chat, &waE2E.Message{Conversation: &msg})
 					return
@@ -362,7 +394,7 @@ func handler(rawEvt interface{}) {
 			}()
 
 			var finalReply string
-			newSessionID, modelName := callGemini(prompt, sessionID, imageData, mimeType, func(thought string, text string) {
+			newSessionID, modelName := callGemini(prompt, sessionID, getWorkingDir(userState), imageData, mimeType, func(thought string, text string) {
 				if text != "" {
 					text = "🤖 *Reply:*\n" + text
 				}
@@ -376,7 +408,7 @@ func handler(rawEvt interface{}) {
 			cancelIndicator()
 			
 			if newSessionID != "" {
-				userSessions[jid] = newSessionID
+				userState.SessionID = newSessionID
 			}
 
 			if sessionID == "" && newSessionID != "" {
@@ -398,8 +430,8 @@ func handler(rawEvt interface{}) {
 	}
 }
 
-func handleSessionsCommand(evt *events.Message) {
-	sessions, err := fetchSessions()
+func handleSessionsCommand(evt *events.Message, userState *UserState) {
+	sessions, err := fetchSessions(getWorkingDir(userState))
 	if err != nil {
 		msg := fmt.Sprintf("❌ Error fetching sessions: %v", err)
 		client.SendMessage(context.Background(), evt.Info.Chat, &waE2E.Message{Conversation: &msg})
@@ -429,8 +461,11 @@ func handleSessionsCommand(evt *events.Message) {
 	client.SendMessage(context.Background(), evt.Info.Chat, &waE2E.Message{Conversation: &reply})
 }
 
-func fetchSessions() ([]Session, error) {
+func fetchSessions(workingDir string) ([]Session, error) {
 	sessionsURL := strings.Replace(geminiURL, "/event", "/sessions", 1)
+	if workingDir != "" {
+		sessionsURL += "?dir=" + url.QueryEscape(workingDir)
+	}
 	resp, err := http.Get(sessionsURL)
 	if err != nil {
 		return nil, err
@@ -447,14 +482,15 @@ func fetchSessions() ([]Session, error) {
 	return sessResp.Sessions, nil
 }
 
-func callGemini(prompt string, sessionId string, imageData string, mimeType string, onChunk func(string, string)) (string, string) {
+func callGemini(prompt string, sessionId string, workingDir string, imageData string, mimeType string, onChunk func(string, string)) (string, string) {
 	payload := GeminiPayload{
-		Source:    "whatsapp",
-		Message:   prompt,
-		SessionID: sessionId,
-		ImageData: imageData,
-		MimeType:  mimeType,
-		ApiKey:    geminiAPIKey,
+		Source:     "whatsapp",
+		Message:    prompt,
+		SessionID:  sessionId,
+		WorkingDir: workingDir,
+		ImageData:  imageData,
+		MimeType:   mimeType,
+		ApiKey:     geminiAPIKey,
 	}
 
 	jsonData, err := json.Marshal(payload)

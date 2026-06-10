@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 const http = require("http");
+const url = require("url");
 const fs = require("fs");
 const path = require("path");
 const { spawn, spawnSync } = require("child_process");
@@ -8,17 +9,22 @@ const port = Number(process.argv[2] || process.env.PORT || 8765);
 
 
 
-function runGemini(prompt, sessionId = null, imageData = null, mimeType = null, apiKey = null, res) {
+function runGemini(prompt, sessionId = null, workingDir = null, imageData = null, mimeType = null, apiKey = null, res, imageDatas = null) {
   let tempFile = null;
   let args = ["--yolo", "-m", "gemini-3.1-pro-preview", "--output-format", "stream-json"];
   
+  let cwd = workingDir || process.cwd();
+  if (cwd && !path.isAbsolute(cwd)) {
+    cwd = path.resolve(process.cwd(), cwd);
+  }
+
   // Special handling for /resume save <name>
   const resumeSaveMatch = prompt.match(/\/resume save (.+)/);
   if (resumeSaveMatch) {
     const sessionName = resumeSaveMatch[1].trim();
     if (sessionName && sessionId) {
       args = ["--resume", sessionId, "--save-session", sessionName];
-      console.log(`[${new Date().toISOString()}] Saving session ${sessionId} as "${sessionName}"`);
+      console.log(`[${new Date().toISOString()}] Saving session ${sessionId} as "${sessionName}" in ${cwd}`);
       
       const envVars = Object.assign({}, process.env);
       if (apiKey) envVars.GEMINI_API_KEY = apiKey;
@@ -27,11 +33,11 @@ function runGemini(prompt, sessionId = null, imageData = null, mimeType = null, 
       let cliArgs = args;
       const localDevBundle = process.env.HOME + "/dev/gemini-cli/bundle/gemini.js";
       if (fs.existsSync(localDevBundle)) {
-        cliCommand = "node";
+        cliCommand = process.execPath;
         cliArgs = [localDevBundle, ...args];
       }
       
-      const p = spawnSync(cliCommand, cliArgs, { env: envVars, encoding: "utf8" });
+      const p = spawnSync(cliCommand, cliArgs, { env: envVars, encoding: "utf8", cwd });
       res.writeHead(200, { "Content-Type": "application/x-ndjson" });
       if (p.status === 0) {
         res.write(JSON.stringify({ type: "message", role: "assistant", content: `✅ Session saved as: ${sessionName}` }) + "\n");
@@ -48,16 +54,23 @@ function runGemini(prompt, sessionId = null, imageData = null, mimeType = null, 
   }
   
   let finalPrompt = prompt;
-  if (imageData) {
+  let hasImage = false;
+  let imagesCount = 0;
+  
+  const imagesToProcess = imageDatas && imageDatas.length > 0 ? imageDatas : (imageData ? [imageData] : []);
+  
+  for (let i = 0; i < imagesToProcess.length; i++) {
     const ext = mimeType === "image/png" ? "png" : "jpg";
-    const fileName = `upload-${Date.now()}.${ext}`;
+    const fileName = `upload-${Date.now()}-${i}.${ext}`;
     tempFile = path.join(__dirname, "..", "uploads", fileName);
-    fs.writeFileSync(tempFile, Buffer.from(imageData, "base64"));
-    finalPrompt = `${prompt} ${tempFile}`;
+    fs.writeFileSync(tempFile, Buffer.from(imagesToProcess[i], "base64"));
+    finalPrompt = `${finalPrompt} ${tempFile}`;
+    hasImage = true;
+    imagesCount++;
   }
   
   args.push("--prompt", finalPrompt);
-  console.log(`[${new Date().toISOString()}] Executing Gemini Streaming (Session: ${sessionId || "new"})${tempFile ? ` with image` : ""}`);
+  console.log(`[${new Date().toISOString()}] Executing Gemini Streaming (Session: ${sessionId || "new"})${hasImage ? ` with ${imagesCount} image(s)` : ""} in ${cwd}`);
   
   const envVars = Object.assign({}, process.env);
   if (apiKey) {
@@ -70,11 +83,19 @@ function runGemini(prompt, sessionId = null, imageData = null, mimeType = null, 
   // Prefer the explicitly patched local repository if it exists
   const localDevBundle = process.env.HOME + "/dev/gemini-cli/bundle/gemini.js";
   if (fs.existsSync(localDevBundle)) {
-    cliCommand = "node";
+    cliCommand = process.execPath;
     cliArgs = [localDevBundle, ...args];
   }
 
-  const p = spawn(cliCommand, cliArgs, { stdio: ["ignore", "pipe", "pipe"], env: envVars });
+  const p = spawn(cliCommand, cliArgs, { stdio: ["ignore", "pipe", "pipe"], env: envVars, cwd });
+
+  res.on("close", () => {
+    if (p && !p.killed && p.exitCode === null) {
+      console.log(`[${new Date().toISOString()}] Client disconnected, killing process...`);
+      p.kill("SIGKILL");
+    }
+  });
+
   const readline = require("readline");
   const rl = readline.createInterface({ input: p.stdout });
   
@@ -161,18 +182,23 @@ function runGemini(prompt, sessionId = null, imageData = null, mimeType = null, 
   });
 }
 
-function listSessions() {
+function listSessions(workingDir) {
+  let cwd = workingDir || process.cwd();
+  if (cwd && !path.isAbsolute(cwd)) {
+    cwd = path.resolve(process.cwd(), cwd);
+  }
+
   return new Promise((resolve, reject) => {
-    console.log(`[${new Date().toISOString()}] Listing sessions...`);
+    console.log(`[${new Date().toISOString()}] Listing sessions in ${cwd}...`);
     let cliCommand = "gemini";
     let cliArgs = ["--list-sessions"];
     const localDevBundle = process.env.HOME + "/dev/gemini-cli/bundle/gemini.js";
     if (fs.existsSync(localDevBundle)) {
-      cliCommand = "node";
+      cliCommand = process.execPath;
       cliArgs = [localDevBundle, "--list-sessions"];
     }
 
-    const p = spawn(cliCommand, cliArgs, { stdio: ["ignore", "pipe", "pipe"] });
+    const p = spawn(cliCommand, cliArgs, { stdio: ["ignore", "pipe", "pipe"], cwd });
     let out = "", err = "";
     p.stdout.on("data", d => (out += d.toString()));
     p.stderr.on("data", d => (err += d.toString()));
@@ -204,17 +230,69 @@ function listSessions() {
   });
 }
 
+function deleteSession(id, workingDir) {
+  let cwd = workingDir || process.cwd();
+  if (cwd && !path.isAbsolute(cwd)) {
+    cwd = path.resolve(process.cwd(), cwd);
+  }
+
+  return new Promise((resolve, reject) => {
+    console.log(`[${new Date().toISOString()}] Deleting session: ${id} in ${cwd}`);
+    let cliCommand = "gemini";
+    let cliArgs = ["--delete-session", id];
+    const localDevBundle = process.env.HOME + "/dev/gemini-cli/bundle/gemini.js";
+    if (fs.existsSync(localDevBundle)) {
+      cliCommand = process.execPath;
+      cliArgs = [localDevBundle, "--delete-session", id];
+    }
+
+    const p = spawn(cliCommand, cliArgs, { stdio: ["ignore", "pipe", "pipe"], cwd });
+    let out = "", err = "";
+    p.stdout.on("data", d => (out += d.toString()));
+    p.stderr.on("data", d => (err += d.toString()));
+    p.on("close", code => {
+      if (code === 0 || code === null) {
+        resolve();
+      } else {
+        console.error(`[${new Date().toISOString()}] Error deleting session: ${err}`);
+        reject(new Error(err || `exit ${code}`));
+      }
+    });
+  });
+}
+
 const server = http.createServer((req, res) => {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
   if (req.method === "GET" && req.url === "/health") {
     res.writeHead(200, { "Content-Type": "text/plain" });
     return res.end("ok");
   }
 
-  if (req.method === "GET" && req.url === "/sessions") {
-    listSessions()
+  if (req.method === "GET" && req.url.startsWith("/sessions")) {
+    const parsedUrl = url.parse(req.url, true);
+    const dir = parsedUrl.query.dir;
+    listSessions(dir)
       .then(sessions => {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true, sessions }));
+      })
+      .catch(e => {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: String(e.message || e) }));
+      });
+    return;
+  }
+
+  if (req.method === "DELETE" && req.url.startsWith("/sessions/")) {
+    const parsedUrl = url.parse(req.url, true);
+    const parts = parsedUrl.pathname.split("/");
+    const id = parts.pop();
+    const dir = parsedUrl.query.dir;
+    
+    deleteSession(id, dir)
+      .then(() => {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
       })
       .catch(e => {
         res.writeHead(500, { "Content-Type": "application/json" });
@@ -237,16 +315,18 @@ const server = http.createServer((req, res) => {
       const source = parsed.source || "unknown";
       const message = parsed.message || "";
       const sessionId = parsed.sessionId || null;
+      const workingDir = parsed.workingDir || null;
       const imageData = parsed.imageData || null;
+      const imageDatas = parsed.imageDatas || null;
       const mimeType = parsed.mimeType || null;
       const apiKey = parsed.apiKey || null;
 
-      if (!message && !imageData) {
+      if (!message && !imageData && (!imageDatas || imageDatas.length === 0)) {
         res.writeHead(400, { "Content-Type": "application/json" });
         return res.end(JSON.stringify({ ok: false, error: "No message or image provided" }));
       }
 
-      runGemini(message, sessionId, imageData, mimeType, apiKey, res);
+      runGemini(message, sessionId, workingDir, imageData, mimeType, apiKey, res, imageDatas);
     });
     return;
   }
@@ -260,9 +340,25 @@ server.timeout = 1800000; // 30 minutes
 server.headersTimeout = 1800000; // 30 minutes
 server.requestTimeout = 1800000; // 30 minutes
 
-function cleanup() {
-  server.close(() => process.exit(0));
-  setTimeout(() => process.exit(0), 1500).unref();
+process.on("uncaughtException", (err) => {
+  console.error(`[${new Date().toISOString()}] Uncaught Exception: ${err}`);
+  console.error(err.stack);
+});
+
+process.on("unhandledRejection", (reason, promise) => {
+  console.error(`[${new Date().toISOString()}] Unhandled Rejection at: ${promise}, reason: ${reason}`);
+});
+
+function cleanup(sig) {
+  console.log(`[${new Date().toISOString()}] Received ${sig}. Cleaning up...`);
+  server.close(() => {
+    console.log(`[${new Date().toISOString()}] Server closed. Exiting.`);
+    process.exit(0);
+  });
+  setTimeout(() => {
+    console.log(`[${new Date().toISOString()}] Cleanup timeout. Forcing exit.`);
+    process.exit(0);
+  }, 1500).unref();
 }
 
 server.listen(port, () => {
@@ -270,5 +366,9 @@ server.listen(port, () => {
   console.log(`Gemini CLI working directory: ${process.cwd()}`);
 });
 
-process.on("SIGINT", cleanup);
-process.on("SIGTERM", cleanup);
+process.on("SIGINT", () => cleanup("SIGINT"));
+process.on("SIGTERM", () => cleanup("SIGTERM"));
+
+
+
+

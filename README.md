@@ -4,6 +4,16 @@ This project provides Telegram and WhatsApp bot integrations for the Gemini CLI,
 
 This project was inspired by the original Slack bot concept from [John Capobianco](https://github.com/automateyournetwork/GeminiCLI_Slash_Listen).
 
+## Documentation
+
+For more detailed information, please refer to the following documentation:
+
+- **[Project Overview](docs/PROJECT_OVERVIEW.md)**: The core mission and key features of the Gemini CLI Server.
+- **[Architecture](docs/ARCHITECTURE.md)**: A deep dive into the system's components and data flow.
+- **[Command Reference](docs/COMMANDS.md)**: A complete list of all bot commands and how to use them.
+- **[Setup Guide](docs/SETUP.md)**: Detailed instructions for installation and platform configuration.
+- **[Testing & Automation](docs/TESTING.md)**: Using the Browser Agent for automated testing and feature verification.
+
 ## Installation
 
 To get started, you'll need to clone this repository and set up the necessary components.
